@@ -5,19 +5,19 @@ set -eu
 usage() {
   cat <<EOF
 用法:
-  curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | \\
-    sh -s -- --repo OWNER/REPO [选项]
+  curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/install.sh | \\
+    sh -s -- --repo yukaijun2001/email-agent [选项]
 
 选项:
   --repo REPO       GitHub 仓库，格式为 owner/name（必填）
   --ref REF         分支、标签或提交引用（默认: main）
-  --dir DIRECTORY   安装目录（默认: \$HOME/email-agent）
+  --dir DIRECTORY   安装目录（默认: /opt/email-agent）
   --port PORT       对外 HTTP 端口（默认保留已有配置，否则为 8000）
   --help            显示此帮助
 
 示例:
-  curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | \\
-    sh -s -- --repo OWNER/REPO --ref v1.0.0 --dir /opt/email-agent --port 8080
+  curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/install.sh | \\
+    sh -s -- --repo yukaijun2001/email-agent --ref v1.0.0 --dir /opt/email-agent --port 8080
 EOF
 }
 
@@ -32,11 +32,7 @@ require_command() {
 
 repo=
 ref=main
-if [ -n "${HOME:-}" ]; then
-  install_dir="$HOME/email-agent"
-else
-  install_dir="$PWD/email-agent"
-fi
+install_dir=/opt/email-agent
 port=
 
 while [ "$#" -gt 0 ]; do

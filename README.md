@@ -52,11 +52,11 @@
 
 ## 服务器一键部署
 
-项目上传到 GitHub 后，可以在安装了 Docker 的服务器上直接用 `curl` 下载源码压缩包并部署，不需要执行 `git clone`。将下面命令中的 `OWNER/REPO` 替换为实际仓库：
+项目上传到 GitHub 后，可以在安装了 Docker 的服务器上直接用 `curl` 下载源码压缩包并部署，不需要执行 `git clone`。当前仓库为 `yukaijun2001/email-agent`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | \
-  sh -s -- --repo OWNER/REPO --ref main --dir "$HOME/email-agent"
+curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/install.sh | \
+  sudo sh -s -- --repo yukaijun2001/email-agent --ref main
 ```
 
 安装脚本会：
@@ -65,11 +65,11 @@ curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | \
 2. 解压到安装目录，保留已有 `.docker.env`、`data/` 和 PostgreSQL 数据卷。
 3. 自动构建应用镜像并启动 PostgreSQL 与应用容器。
 
-指定服务器端口或固定发布标签：
+默认安装目录为 `/opt/email-agent`。也可以指定服务器端口、固定发布标签或自定义目录：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | \
-  sudo sh -s -- --repo OWNER/REPO --ref v1.0.0 --dir /opt/email-agent --port 8080
+curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/install.sh | \
+  sudo sh -s -- --repo yukaijun2001/email-agent --ref v1.0.0 --dir /opt/email-agent --port 8080
 ```
 
 安装完成后进入安装目录管理服务：
