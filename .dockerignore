@@ -1,0 +1,11 @@
+.git
+.gitignore
+.DS_Store
+.runtime
+data
+.docker.env
+inbox_config.json
+tests
+__pycache__
+*.py[cod]
+*.log

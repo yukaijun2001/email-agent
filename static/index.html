@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="本地只读收件箱">
+  <title>收件箱 · 只读邮件</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="grid-overlay" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="wordmark" href="/" aria-label="返回收件箱">
+      <span class="mark" aria-hidden="true">in</span>
+      <span class="wordmark-label">收件箱</span>
+    </a>
+    <div class="header-right">
+      <strong id="accountName" class="account-name">未配置</strong>
+      <div class="connection" id="connectionStatus">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>连接检查中</span>
+      </div>
+      <div class="connection" id="liveStatus" title="WebSocket 实时推送状态">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>实时推送未连接</span>
+      </div>
+      <button id="helpButton" class="button button-quiet" type="button">教程</button>
+      <button id="settingsButton" class="button button-quiet" type="button">邮箱管理</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="toolbar" aria-label="收件箱工具栏">
+      <div class="toolbar-filters">
+      <label class="search-box">
+        <span class="search-icon" aria-hidden="true"></span>
+        <span class="sr-only">搜索邮件</span>
+        <input id="searchInput" type="search" placeholder="搜索发件人或主题" autocomplete="off">
+      </label>
+      </div>
+      <div class="toolbar-actions">
+        <span id="resultCount" class="result-count">等待同步</span>
+        <button id="refreshButton" class="button button-dark" type="button">
+          <span class="refresh-icon" aria-hidden="true">↻</span>同步收件箱
+        </button>
+      </div>
+    </section>
+    <div id="accountErrors" class="account-errors" role="alert" hidden></div>
+    <div id="newMailBanner" class="new-mail-banner" role="status" aria-live="polite" hidden></div>
+
+    <section class="workspace" aria-label="邮箱列表和邮件列表">
+      <aside class="mailbox-panel" aria-label="邮箱列表">
+        <div class="mailbox-panel-head">
+          <div>
+            <p class="eyebrow">MAILBOXES</p>
+            <h2>邮箱</h2>
+          </div>
+          <span id="accountCount" class="panel-count">0</span>
+        </div>
+        <div id="mailboxList" class="mailbox-list" role="listbox" aria-label="选择邮箱"></div>
+      </aside>
+      <section class="email-panel" aria-label="邮件列表">
+        <header class="email-panel-head">
+          <div>
+            <p class="eyebrow">INBOX / READ ONLY</p>
+            <h1 id="mailboxHeading">全部邮件</h1>
+          </div>
+          <span id="listState" class="list-state" role="status">正在连接邮箱…</span>
+        </header>
+        <div id="emailList" class="email-list" hidden></div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>本地运行 · IMAP SSL</span>
+    <span>只读模式已启用</span>
+  </footer>
+  <dialog id="configDialog" class="config-dialog">
+    <div class="config-form">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">MAIL ACCOUNTS</p>
+          <h2>邮箱管理</h2>
+        </div>
+        <button id="configClose" class="dialog-close" type="button" aria-label="关闭邮箱管理">×</button>
+      </div>
+      <p id="configIntro" class="dialog-intro">可以添加多个邮箱，收件箱会合并显示所有邮箱的邮件。</p>
+      <ul id="accountList" class="account-list" aria-label="已添加的邮箱"></ul>
+      <button id="addAccountButton" class="button button-light add-account" type="button">＋ 添加邮箱</button>
+      <form id="configForm" class="account-form" hidden>
+        <p id="formTitle" class="form-title">添加邮箱</p>
+        <label class="field-label" for="imapServer">IMAP 服务器</label>
+        <input id="imapServer" class="field-input" name="imap_server" type="text" placeholder="imap.example.com" autocomplete="off" required>
+        <div class="field-grid">
+          <div>
+            <label class="field-label" for="imapPort">端口</label>
+            <input id="imapPort" class="field-input" name="imap_port" type="number" min="1" max="65535" value="993" required>
+          </div>
+          <div>
+            <label class="field-label" for="imapAccount">邮箱账号</label>
+            <input id="imapAccount" class="field-input" name="account" type="text" placeholder="you@example.com" autocomplete="username" required>
+          </div>
+        </div>
+        <label class="field-label" for="imapPassword">授权码 / 应用密码</label>
+        <input id="imapPassword" class="field-input" name="password" type="password" autocomplete="new-password">
+        <p id="passwordHint" class="field-hint">设置会保存在本机；修改已有邮箱时留空即可保留原授权码。</p>
+        <p id="configError" class="config-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="configCancel" class="button button-light" type="button">取消</button>
+          <button id="configSave" class="button button-dark" type="submit">保存并连接</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+  <dialog id="helpDialog" class="help-dialog">
+    <div class="help-content">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">QUICK GUIDE</p>
+          <h2>收件箱使用教程</h2>
+        </div>
+        <button id="helpClose" class="dialog-close" type="button" aria-label="关闭教程">×</button>
+      </div>
+      <div class="help-section">
+        <h3>可以做什么</h3>
+        <ul>
+          <li><strong>多邮箱</strong><span>在“邮箱管理”中添加多个邮箱，列表合并显示，也可用左上角下拉框只看某一个邮箱。</span></li>
+          <li><strong>实时推送</strong><span>页面打开期间服务会定时检查各邮箱，新邮件通过 WebSocket 自动出现在列表顶部，无需手动刷新。</span></li>
+          <li><strong>只读收件箱</strong><span>读取 INBOX 邮件，不发送、回复、删除或移动邮件。</span></li>
+          <li><strong>搜索邮件</strong><span>按发件人或主题快速筛选当前邮件列表。</span></li>
+          <li><strong>查看正文</strong><span>点击邮件后在右侧以富文本完整显示正文，包括图片、样式、链接和附带的图片。</span></li>
+          <li><strong>即时同步</strong><span>点击“同步收件箱”重新读取最近 50 封邮件。</span></li>
+          <li><strong>热更新设置</strong><span>点击“邮箱管理”添加、修改或删除邮箱，保存后立即生效。</span></li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h3>首次配置：按这 5 步操作</h3>
+        <ol>
+          <li><strong>先在邮箱服务商后台开启 IMAP</strong><span>登录你的网页版邮箱，进入“设置 / 账户 / 邮件协议”一类的页面，打开 IMAP 服务。部分服务商不会直接使用网页登录密码，而是要求创建“授权码”或“应用专用密码”。</span></li>
+          <li><strong>打开本页面右上角的“邮箱管理”</strong><span>首次打开时会自动弹出；之后可以随时点击“邮箱管理”重新打开。</span></li>
+          <li><strong>填写 IMAP 服务器和端口</strong><span>服务器填邮箱服务商提供的 IMAP 主机名，端口通常填 <code>993</code>。本服务使用 IMAP SSL，不要填写 SMTP 服务器，也不要填写网页邮箱地址。</span></li>
+          <li><strong>填写邮箱账号和授权码</strong><span>账号通常是完整邮箱地址。密码框填写授权码/应用专用密码；如果服务商明确允许邮箱密码，也可以填写邮箱密码。授权码不会显示在页面状态接口中。</span></li>
+          <li><strong>点击“保存并连接”</strong><span>配置会保存在本机，保存成功后页面会立即尝试读取 INBOX。右上角显示已配置的邮箱数量并出现邮件列表，代表配置已生效。</span></li>
+        </ol>
+      </div>
+      <div class="help-section">
+        <h3>常用邮箱参数</h3>
+        <div class="provider-table" role="table" aria-label="常用邮箱 IMAP 参数">
+          <div class="provider-row provider-head" role="row"><span>服务商</span><span>IMAP 服务器</span><span>端口</span></div>
+          <div class="provider-row" role="row"><strong>QQ 邮箱</strong><code>imap.qq.com</code><code>993</code></div>
+          <div class="provider-row" role="row"><strong>163 邮箱</strong><code>imap.163.com</code><code>993</code></div>
+          <div class="provider-row" role="row"><strong>Gmail</strong><code>imap.gmail.com</code><code>993</code></div>
+          <div class="provider-row" role="row"><strong>Outlook</strong><code>outlook.office365.com</code><code>993</code></div>
+        </div>
+        <p class="help-subnote">以上参数仅适用于启用了 IMAP 的账号。企业邮箱、学校邮箱或自定义域名邮箱请以管理员/服务商给出的 IMAP 地址为准。</p>
+      </div>
+      <div class="help-section">
+        <h3>如何开启 IMAP 并取得登录凭据</h3>
+        <div class="provider-guides">
+          <article class="provider-guide">
+            <h4>QQ 邮箱</h4>
+            <ol>
+              <li>在浏览器登录 QQ 邮箱，进入<strong>设置 → 账号</strong>。</li>
+              <li>找到 <strong>POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV 服务</strong>。</li>
+              <li>开启 <strong>IMAP/SMTP 服务</strong>，按页面要求完成安全验证。</li>
+              <li>复制页面生成的授权码；它只会完整显示一次，请先妥善保存。</li>
+              <li>回到本页“邮箱管理”：服务器填 <code>imap.qq.com</code>，端口填 <code>993</code>，账号填完整 QQ 邮箱地址，密码框填刚生成的授权码。</li>
+            </ol>
+          </article>
+          <article class="provider-guide">
+            <h4>163 邮箱</h4>
+            <ol>
+              <li>在浏览器登录 163 邮箱，打开<strong>设置 → POP3/SMTP/IMAP</strong>。</li>
+              <li>开启 <strong>IMAP/SMTP 服务</strong>，并根据页面提示完成手机验证。</li>
+              <li>创建或重置客户端授权密码，并复制新生成的授权码。</li>
+              <li>回到本页“邮箱管理”：服务器填 <code>imap.163.com</code>，端口填 <code>993</code>，账号填完整 163 邮箱地址，密码框填客户端授权码。</li>
+              <li>若提示认证失败，请重新生成授权码；不要填写网页版邮箱登录密码。</li>
+            </ol>
+          </article>
+          <article class="provider-guide">
+            <h4>Gmail</h4>
+            <ol>
+              <li>打开 Google 账号的<strong>安全性</strong>页面，先开启<strong>两步验证</strong>。</li>
+              <li>在安全性页面搜索并进入<strong>应用专用密码</strong>；若该入口不存在，可能是组织策略、儿童账号或高级保护功能不允许创建。</li>
+              <li>为邮件客户端创建一个应用专用密码，复制生成的 16 位密码；填写时可以不保留空格。</li>
+              <li>回到本页“邮箱管理”：服务器填 <code>imap.gmail.com</code>，端口填 <code>993</code>，账号填完整 Gmail 地址，密码框填应用专用密码。</li>
+              <li>Google Workspace 账号还可能需要管理员允许 IMAP；被策略禁用时请联系组织管理员。</li>
+            </ol>
+          </article>
+          <article class="provider-guide">
+            <h4>Outlook / Microsoft 365</h4>
+            <ol>
+              <li>先确认账号允许使用 IMAP；组织账号可能由 Microsoft 365 管理员统一控制。</li>
+              <li>如果账号已开启多重验证且安全页面提供<strong>应用密码</strong>，创建并复制一个新的应用密码。</li>
+              <li>回到本页“邮箱管理”：服务器填 <code>outlook.office365.com</code>，端口填 <code>993</code>，账号填完整邮箱地址，密码框优先填应用密码。</li>
+              <li>点击“保存并连接”。如果组织只允许 OAuth2 或已禁用基本身份验证，本服务当前无法登录，需要管理员开放可用的 IMAP 登录方式。</li>
+            </ol>
+          </article>
+        </div>
+      </div>
+      <div class="help-section">
+        <h3>字段怎么填</h3>
+        <dl class="help-definitions">
+          <div><dt>IMAP 服务器</dt><dd>接收邮件的服务器主机名，例如 <code>imap.gmail.com</code>。不要写 <code>https://</code>，也不要写网页邮箱首页地址。</dd></div>
+          <div><dt>端口</dt><dd>SSL 加密连接使用 <code>993</code>。只有服务商明确要求其他端口时才修改。</dd></div>
+          <div><dt>邮箱账号</dt><dd>通常填写完整地址，例如 <code>name@example.com</code>。少数企业邮箱使用员工编号或其他登录名，请按服务商要求填写。</dd></div>
+          <div><dt>授权码 / 应用密码</dt><dd>这是 IMAP 登录凭据，不一定等于网页登录密码。修改服务器或账号时密码框留空，会保留已经保存的授权码。</dd></div>
+        </dl>
+      </div>
+      <div class="help-section">
+        <h3>配置完成后怎么用</h3>
+        <ol>
+          <li><strong>同步</strong><span>点击“同步收件箱”，读取最近 50 封 INBOX 邮件。同步不会标记已读。</span></li>
+          <li><strong>搜索</strong><span>在搜索框输入发件人姓名、邮箱地址或主题关键词，列表会即时筛选。</span></li>
+          <li><strong>阅读</strong><span>点击左侧邮件，右侧会显示发件人、收件人、主题、日期和完整的富文本正文。</span></li>
+          <li><strong>修改配置</strong><span>点击“邮箱管理”，对某个邮箱点“编辑”更换服务器、端口或账号后保存，或点“添加邮箱”接入新邮箱；无需重启服务。</span></li>
+        </ol>
+      </div>
+      <div class="help-section">
+        <h3>连接失败时检查</h3>
+        <ul>
+          <li><strong>登录失败</strong><span>确认 IMAP 已开启，并使用授权码/应用专用密码；不要把 SMTP 密码或网页验证码填进来。</span></li>
+          <li><strong>无法连接服务器</strong><span>确认服务器拼写正确、端口为 993，且当前网络没有拦截 IMAP SSL。</span></li>
+          <li><strong>Gmail 拒绝登录</strong><span>通常需要开启两步验证并创建应用专用密码；普通 Google 账号密码经常无法直接用于 IMAP。</span></li>
+          <li><strong>163/QQ 拒绝登录</strong><span>重新进入网页版邮箱生成新的 IMAP 授权码，并确认 IMAP 服务开关已打开。</span></li>
+          <li><strong>修改后仍显示旧邮箱</strong><span>重新点击“同步收件箱”；页面不会在修改设置后自动保留旧邮件列表。</span></li>
+        </ul>
+      </div>
+      <p class="help-note">连接设置保存在本机。读取邮件使用 IMAP SSL 只读模式，不会改变邮件的已读状态。</p>
+    </div>
+  </dialog>
+  <dialog id="messageDialog" class="message-dialog" aria-labelledby="messageDialogTitle">
+    <div class="message-dialog-shell">
+      <button id="messageClose" class="dialog-close message-close" type="button" aria-label="关闭邮件详情">×</button>
+      <div id="messageDialogContent" class="message-dialog-content">
+        <div class="empty-detail">
+          <span class="detail-loading">正在读取邮件正文…</span>
+        </div>
+      </div>
+    </div>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>
