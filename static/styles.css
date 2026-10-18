@@ -206,7 +206,7 @@ body { background: var(--paper); color: var(--ink); }
 .message-dialog { width: min(1120px, calc(100vw - 42px)); max-width: none; max-height: min(900px, calc(100vh - 42px)); overflow: hidden; border: 1px solid rgb(255 255 255 / 0.85); border-radius: 22px; padding: 0; background: rgb(247 246 243 / 0.96); box-shadow: 0 30px 90px rgb(10 10 10 / 0.18); }
 .message-dialog::backdrop { background: rgb(10 10 10 / 0.28); }
 .message-dialog-shell { position: relative; max-height: min(900px, calc(100vh - 42px)); overflow: auto; padding: 36px 48px 48px; }
-.message-close { position: absolute; top: 20px; right: 22px; z-index: 2; }
+.message-dialog > .message-close { position: absolute; top: 16px; right: 16px; z-index: 2; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 50%; background: var(--paper); box-shadow: 0 3px 12px rgb(10 10 10 / 0.08); }
 .message-dialog-content .detail-content { padding: 18px 0 0; animation: content-arrive 600ms var(--ease-out-expo) both; }
 .message-dialog-content .detail-heading { padding: 18px 0 28px; border: 0; }
 .message-dialog-content .detail-heading h2 { max-width: 900px; color: var(--ink); font: 650 clamp(23px, 3vw, 38px)/1.2 var(--sans); }
@@ -369,6 +369,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .mailbox-list { grid-template-columns: 1fr; }
   .email-row { min-height: 130px; padding: 18px; }
   .message-dialog { width: calc(100vw - 20px); max-height: calc(100vh - 20px); }
+  .message-dialog > .message-close { top: 12px; right: 12px; }
   .message-dialog-shell { max-height: calc(100vh - 20px); padding: 24px 16px 22px; }
   .message-dialog-content .detail-meta { gap: 14px; padding: 18px; }
   .message-dialog-content .meta-row { grid-template-columns: 1fr; gap: 4px; }
