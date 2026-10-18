@@ -468,7 +468,7 @@
     passwordInput.required = !(item && item.has_password);
     passwordHint.textContent = item && item.has_password
       ? "留空即可保留原授权码。"
-      : "授权码只保存在本机，用于连接 IMAP。";
+      : "授权码保存在部署服务器，用于连接 IMAP，不会通过接口返回。";
     serverInput.focus();
   }
 
@@ -559,7 +559,7 @@
   }
 
   async function deleteAccount(item) {
-    if (!window.confirm(`删除邮箱“${item.account}”？本地保存的授权码也会一并删除。`)) return;
+    if (!window.confirm(`删除邮箱“${item.account}”？服务器保存的授权码也会一并删除。`)) return;
     try {
       applyAccounts(await api(`/api/accounts/${encodeURIComponent(item.id)}`, { method: "DELETE" }));
       if (state.editing === item.id) hideForm();

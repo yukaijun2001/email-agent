@@ -72,6 +72,10 @@ curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/insta
   sudo sh -s -- --repo yukaijun2001/email-agent --ref v1.0.0 --dir /opt/email-agent --port 8080
 ```
 
+部署后访问 `http://服务器IP:8000`（或指定端口）。应用会从浏览器实际访问地址自动识别服务器 IP、域名和外部端口，无需手动配置地址白名单；支持 Docker 端口映射及 HTTPS 域名访问，WebSocket 跟随页面地址连接。邮箱及授权码保存在部署服务器的 PostgreSQL 中，“保存在服务器”是说明文字，不是邮箱连接错误。
+
+如果通过 Nginx 等反向代理访问，请保留原始 `Host`（例如 `proxy_set_header Host $http_host;`），并转发 WebSocket 的 `Upgrade` / `Connection` 头。代理改写为容器内部 Host 时，会与浏览器 Origin 不一致而被拒绝。
+
 安装完成后进入安装目录管理服务：
 
 ```bash
@@ -81,6 +85,8 @@ cd /opt/email-agent
 ./deploy.sh stop
 ./deploy.sh start
 ```
+
+更新已部署的服务器时，推送修复代码后重新执行上方 `--ref main` 的一键部署命令即可。安装脚本会保留 `.docker.env`、`data/` 和 PostgreSQL 数据卷，并重新构建、启动应用。
 
 ## 一键卸载
 
@@ -147,7 +153,7 @@ curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/unins
 | GET | `/api/accounts/{id}/emails/{uid}` | 邮件信息（发件人、收件人、抄送、主题、日期） |
 | GET | `/api/accounts/{id}/emails/{uid}/html` | 完整的富文本正文（独立 HTML 文档，供 iframe 显示） |
 
-服务只监听 `127.0.0.1`，没有登录鉴权：任何能访问本机的进程都能调用这些接口。接口会拒绝 `Host` 不是本机地址的请求（防 DNS 重绑定），WebSocket 只接受本页面来源（`Origin`）的连接。请不要把端口转发或暴露到局域网/公网。
+直接用 `inbox.sh` 启动时，服务默认只监听 `127.0.0.1`，保留本机 Host 校验；Docker 部署监听 `0.0.0.0`，自动适配有效的访问 IP、域名和端口。浏览器的添加、修改、删除请求及 WebSocket 连接会校验 `Origin` 与当前访问地址一致。项目本身没有登录鉴权，访问权限应由部署环境或反向代理控制。
 
 ## 验证
 

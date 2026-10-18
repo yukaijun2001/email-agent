@@ -159,7 +159,10 @@ class StubReader:
 class EndToEndTests(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
-        self.patches = [patch("scripts.config.CONFIG_PATH", Path(self._dir.name) / "inbox_config.json")]
+        self.patches = [
+            patch("scripts.config.CONFIG_PATH", Path(self._dir.name) / "inbox_config.json"),
+            patch.object(config, "APP_HOST", "127.0.0.1"),
+        ]
         for p in self.patches:
             p.start()
         Config.reset_for_tests()
@@ -188,12 +191,12 @@ class EndToEndTests(unittest.TestCase):
         Config.reset_for_tests()
         self._dir.cleanup()
 
-    def _open_ws(self, origin=None):
+    def _open_ws(self, origin=None, host=None):
         sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
         key = base64.b64encode(os.urandom(16)).decode()
         origin = origin or f"http://127.0.0.1:{self.port}"
         sock.sendall((
-            f"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nUpgrade: websocket\r\n"
+            f"GET /ws HTTP/1.1\r\nHost: {host or f'127.0.0.1:{self.port}'}\r\nUpgrade: websocket\r\n"
             f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
             f"Origin: {origin}\r\n\r\n"
         ).encode())
@@ -208,14 +211,151 @@ class EndToEndTests(unittest.TestCase):
             headers[name.lower()] = value.strip()
         return sock, stream, status, headers, key
 
-    def _request(self, method, path, body=None):
+    def _request(self, method, path, body=None, headers=None):
         conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
-        headers = {"Content-Type": "application/json"} if body is not None else {}
-        conn.request(method, path, body=json.dumps(body) if body is not None else None, headers=headers)
+        request_headers = {"Content-Type": "application/json"} if body is not None else {}
+        request_headers.update(headers or {})
+        conn.request(method, path, body=json.dumps(body) if body is not None else None, headers=request_headers)
         response = conn.getresponse()
         data = json.loads(response.read() or b"{}")
         conn.close()
         return response.status, data
+
+    def test_server_deployment_can_add_mailbox_using_public_host(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            status, result = self._request("POST", "/api/accounts", {
+                "imap_server": "imap.test", "imap_port": 993,
+                "account": "deployed@test", "password": "test-app-password",
+            }, headers={"Host": "203.0.113.10:8080", "Origin": "http://203.0.113.10:8080"})
+        self.assertEqual(status, 201, result)
+        self.assertNotIn("password", result)
+        self.assertEqual(Config.connection_values(result["id"])[2], "deployed@test")
+
+    def test_server_deployment_supports_account_crud_at_detected_addresses(self):
+        cases = (
+            ("203.0.113.10:8080", "http://203.0.113.10:8080"),
+            ("inbox.example.test", "https://inbox.example.test"),
+            ("inbox.example.test:443", "https://inbox.example.test"),
+            ("inbox.example.test", "http://inbox.example.test:80"),
+            ("localhost:18000", "http://localhost:18000"),
+            ("[2001:db8::10]:8080", "http://[2001:db8::10]:8080"),
+        )
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            for host, origin in cases:
+                with self.subTest(host=host, origin=origin):
+                    headers = {"Host": host, "Origin": origin}
+                    payload = {"imap_server": "imap.test", "imap_port": 993,
+                               "account": "deployed@test", "password": "fixture-only"}
+                    status, created = self._request("POST", "/api/accounts", payload, headers=headers)
+                    self.assertEqual(status, 201, created)
+                    account_path = f"/api/accounts/{created['id']}"
+                    status, snapshot = self._request("GET", "/api/accounts", headers=headers)
+                    self.assertEqual(status, 200, snapshot)
+                    self.assertNotIn("password", snapshot["accounts"][0])
+                    payload.update(imap_port=995, password="")
+                    status, edited = self._request("PUT", account_path, payload, headers=headers)
+                    self.assertEqual((status, edited["imap_port"]), (200, 995))
+                    self.assertEqual(Config.connection_values(created["id"])[3], "fixture-only")
+                    status, snapshot = self._request("DELETE", account_path, headers=headers)
+                    self.assertEqual((status, snapshot["accounts"]), (200, []))
+
+    def test_server_deployment_rejects_cross_origin_account_changes(self):
+        account_id = Config.add_account("imap.test", 993, "deployed@test", "fixture-only")["id"]
+        payload = {"imap_server": "imap.test", "imap_port": 993,
+                   "account": "foreign@test", "password": "fixture-only"}
+        origins = ("https://evil.example", "https://inbox.example.test:444", "null",
+                   "https://inbox.example.test/path", "https://inbox.example.test@evil.example")
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            for origin in origins:
+                for method, path in (("POST", "/api/accounts"), ("PUT", f"/api/accounts/{account_id}"),
+                                     ("DELETE", f"/api/accounts/{account_id}")):
+                    with self.subTest(origin=origin, method=method):
+                        status, _ = self._request(method, path, payload,
+                                                  headers={"Host": "inbox.example.test", "Origin": origin})
+                        self.assertEqual(status, 403)
+        self.assertEqual(Config.account_ids(), [account_id])
+
+    def test_server_deployment_rejects_cross_site_write_without_origin(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            status, _ = self._request("DELETE", "/api/accounts/aaaaaaaa",
+                                      headers={"Host": "inbox.example.test", "Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(status, 403)
+
+    def test_server_deployment_keeps_cli_requests_without_origin_working(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            status, result = self._request("POST", "/api/accounts", {
+                "imap_server": "imap.test", "imap_port": 993,
+                "account": "cli@test", "password": "fixture-only",
+            }, headers={"Host": "203.0.113.10:8080"})
+        self.assertEqual(status, 201, result)
+
+    def test_server_deployment_rejects_invalid_hosts(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            for host in ("", "https://inbox.example.test", "user@inbox.example.test", "inbox.example.test/path",
+                         "inbox.example.test:65536", "inbox.example.test:0", "inbox.example.test:",
+                         "inbox.example.test,evil.test", "bad host", "bad..test", "[not-an-ip]"):
+                with self.subTest(host=host):
+                    status, _ = self._request("GET", "/api/accounts", headers={"Host": host})
+                    self.assertEqual(status, 403)
+
+    def test_server_deployment_rejects_duplicate_hosts(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+            try:
+                conn.putrequest("GET", "/api/accounts", skip_host=True)
+                conn.putheader("Host", "inbox.example.test")
+                conn.putheader("Host", "evil.example")
+                conn.endheaders()
+                self.assertEqual(conn.getresponse().status, 403)
+            finally:
+                conn.close()
+
+    def test_server_deployment_websocket_accepts_public_same_origin(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            sock, stream, status, _headers, _key = self._open_ws(
+                host="inbox.example.test", origin="https://inbox.example.test",
+            )
+            try:
+                self.assertIn("101", status)
+            finally:
+                sock.close()
+                stream.close()
+
+    def test_server_deployment_websocket_rejects_other_origins(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            for origin in ("https://evil.example", "https://inbox.example.test:444", "null"):
+                with self.subTest(origin=origin):
+                    sock, stream, status, _headers, _key = self._open_ws(
+                        host="inbox.example.test", origin=origin,
+                    )
+                    try:
+                        self.assertIn("403", status)
+                    finally:
+                        sock.close()
+                        stream.close()
+
+    def test_server_deployment_does_not_trust_forwarded_host(self):
+        with patch.object(config, "APP_HOST", "0.0.0.0"):
+            status, _ = self._request("DELETE", "/api/accounts/aaaaaaaa", headers={
+                "Host": "inbox.example.test", "Origin": "https://evil.example",
+                "X-Forwarded-Host": "evil.example", "Forwarded": "host=evil.example;proto=https",
+            })
+        self.assertEqual(status, 403)
+
+    def test_server_deployment_csp_uses_actual_public_websocket_address(self):
+        for host in ("203.0.113.10:8080", "inbox.example.test"):
+            with self.subTest(host=host):
+                conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+                try:
+                    conn.request("GET", "/", headers={"Host": host})
+                    response = conn.getresponse()
+                    csp = response.getheader("Content-Security-Policy")
+                    response.read()
+                    self.assertIn(f"ws://{host}", csp)
+                    self.assertIn(f"wss://{host}", csp)
+                    self.assertNotIn("ws://127.0.0.1:8000", csp)
+                finally:
+                    conn.close()
 
     def test_accounts_api_and_new_mail_push(self):
         status, created = self._request("POST", "/api/accounts", {

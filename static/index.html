@@ -73,7 +73,7 @@
   </main>
 
   <footer class="footer">
-    <span>本地运行 · IMAP SSL</span>
+    <span>IMAP SSL · 实时同步</span>
     <span>只读模式已启用</span>
   </footer>
   <dialog id="configDialog" class="config-dialog">
@@ -104,7 +104,7 @@
         </div>
         <label class="field-label" for="imapPassword">授权码 / 应用密码</label>
         <input id="imapPassword" class="field-input" name="password" type="password" autocomplete="new-password">
-        <p id="passwordHint" class="field-hint">设置会保存在本机；修改已有邮箱时留空即可保留原授权码。</p>
+        <p id="passwordHint" class="field-hint">设置保存在部署服务器；修改已有邮箱时留空即可保留原授权码。</p>
         <p id="configError" class="config-error" role="alert" hidden></p>
         <div class="dialog-actions">
           <button id="configCancel" class="button button-light" type="button">取消</button>
@@ -141,7 +141,7 @@
           <li><strong>打开本页面右上角的“邮箱管理”</strong><span>首次打开时会自动弹出；之后可以随时点击“邮箱管理”重新打开。</span></li>
           <li><strong>填写 IMAP 服务器和端口</strong><span>服务器填邮箱服务商提供的 IMAP 主机名，端口通常填 <code>993</code>。本服务使用 IMAP SSL，不要填写 SMTP 服务器，也不要填写网页邮箱地址。</span></li>
           <li><strong>填写邮箱账号和授权码</strong><span>账号通常是完整邮箱地址。密码框填写授权码/应用专用密码；如果服务商明确允许邮箱密码，也可以填写邮箱密码。授权码不会显示在页面状态接口中。</span></li>
-          <li><strong>点击“保存并连接”</strong><span>配置会保存在本机，保存成功后页面会立即尝试读取 INBOX。右上角显示已配置的邮箱数量并出现邮件列表，代表配置已生效。</span></li>
+          <li><strong>点击“保存并连接”</strong><span>配置保存在部署服务器，保存成功后页面会立即尝试读取 INBOX。右上角显示已配置的邮箱数量并出现邮件列表，代表配置已生效。</span></li>
         </ol>
       </div>
       <div class="help-section">
@@ -227,7 +227,7 @@
           <li><strong>修改后仍显示旧邮箱</strong><span>重新点击“同步收件箱”；页面不会在修改设置后自动保留旧邮件列表。</span></li>
         </ul>
       </div>
-      <p class="help-note">连接设置保存在本机。读取邮件使用 IMAP SSL 只读模式，不会改变邮件的已读状态。</p>
+      <p class="help-note">连接设置保存在部署服务器。读取邮件使用 IMAP SSL 只读模式，不会改变邮件的已读状态。</p>
     </div>
   </dialog>
   <dialog id="messageDialog" class="message-dialog" aria-labelledby="messageDialogTitle">

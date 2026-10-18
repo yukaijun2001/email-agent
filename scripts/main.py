@@ -6,6 +6,7 @@ import json
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -24,8 +25,8 @@ MESSAGE_PATH = re.compile(r"/api/accounts/([0-9a-f]{8})/emails/([0-9]{1,20})")
 MESSAGE_HTML_PATH = re.compile(r"/api/accounts/([0-9a-f]{8})/emails/([0-9]{1,20})/html")
 PAGE_CSP = (
     "default-src 'self'; img-src 'self' data:; style-src 'self'; frame-src 'self'; "
-    "script-src 'self'; connect-src 'self' ws://127.0.0.1:%d ws://localhost:%d; base-uri 'none'; "
-    "frame-ancestors 'none'; form-action 'none'" % (config.APP_PORT, config.APP_PORT)
+    "script-src 'self'; connect-src 'self'; base-uri 'none'; "
+    "frame-ancestors 'none'; form-action 'none'"
 )
 # Mail documents: load every resource the mail references (images, styles,
 # fonts, media, frames), but never run scripts or submit forms, and only
@@ -36,6 +37,26 @@ MAIL_CSP = (
 )
 
 
+def _parse_authority(value: str) -> tuple[str, int | None] | None:
+    """Parse a Host authority without accepting URLs or header/CSP delimiters."""
+    if not re.fullmatch(r"(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?", value):
+        return None
+    try:
+        parsed = urlsplit(f"//{value}")
+        hostname, port = parsed.hostname, parsed.port
+    except ValueError:
+        return None
+    if not hostname or port == 0:
+        return None
+    if ":" not in hostname:
+        labels = hostname.rstrip(".").split(".")
+        if len(hostname) > 254 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels
+        ):
+            return None
+    return hostname, port
+
+
 class InboxHandler(BaseHTTPRequestHandler):
     reader = InboxReader()
     hub = realtime.Hub()
@@ -43,7 +64,17 @@ class InboxHandler(BaseHTTPRequestHandler):
     server_version = "InboxReader/1.0"
     sys_version = ""
 
-    def _respond(self, status: int, body: bytes, content_type: str, csp: str = PAGE_CSP) -> None:
+    def _respond(self, status: int, body: bytes, content_type: str, csp: str | None = None) -> None:
+        if csp is None:
+            csp = PAGE_CSP
+            authority = self._request_authority()
+            if authority:
+                # Browser 'self' handling for WebSockets varies. Authorize the
+                # actual public address, including a Docker-mapped port or TLS proxy.
+                csp = csp.replace(
+                    "connect-src 'self';",
+                    f"connect-src 'self' ws://{authority} wss://{authority};",
+                )
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -95,18 +126,65 @@ class InboxHandler(BaseHTTPRequestHandler):
         self._respond(200, body, content_type)
 
     # ------------------------------------------------------------------ guards
-    def _allowed_hosts(self) -> set[str]:
-        port = config.APP_PORT
-        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+    def _request_authority(self) -> str | None:
+        hosts = self.headers.get_all("Host", [])
+        if len(hosts) != 1:
+            return None
+        authority = hosts[0].strip().lower()
+        return authority if _parse_authority(authority) else None
 
     def _host_ok(self) -> bool:
-        """Reject DNS-rebinding requests whose Host header is not this local server."""
-        return self.headers.get("Host", "").strip().lower() in self._allowed_hosts()
+        """Keep local binding restricted; discover public addresses from Host."""
+        authority = self._request_authority()
+        if not authority:
+            return False
+        hostname, port = _parse_authority(authority)
+        try:
+            local_binding = ip_address(config.APP_HOST).is_loopback
+        except ValueError:
+            local_binding = config.APP_HOST.lower() == "localhost"
+        if not local_binding:
+            # The container cannot discover a NAT address or an external proxy
+            # port from its interfaces. Use the address the browser actually used.
+            return True
+        return hostname in {"localhost", "127.0.0.1", "::1", config.APP_HOST.lower()} and (
+            port if port is not None else 80
+        ) == config.APP_PORT
 
     def _origin_ok(self) -> bool:
-        """Only pages served by this app may open the WebSocket."""
-        origin = self.headers.get("Origin", "").strip().lower()
-        return origin in {f"http://{host}" for host in self._allowed_hosts()}
+        """Match the browser origin to Host, including default HTTP(S) ports."""
+        authority = self._request_authority()
+        origins = self.headers.get_all("Origin", [])
+        if not authority or len(origins) != 1:
+            return False
+        try:
+            origin = urlsplit(origins[0].strip().lower())
+        except ValueError:
+            return False
+        if origin.scheme not in {"http", "https"} or origin.path or origin.query or origin.fragment:
+            return False
+        origin_host = _parse_authority(origin.netloc)
+        if not origin_host:
+            return False
+        request_host = _parse_authority(authority)
+        default_port = 443 if origin.scheme == "https" else 80
+        return (origin_host[0], origin_host[1] or default_port) == (
+            request_host[0], request_host[1] or default_port,
+        )
+
+    def _request_allowed(self, *, write: bool = False) -> bool:
+        if not self._host_ok():
+            self._json(403, {"error": "访问地址未被允许，请使用部署服务器的有效 IP 或域名访问。"})
+            return False
+        # CLI clients may omit Origin. Browser writes must come from this app;
+        # never trust client-supplied X-Forwarded-Host to bypass this comparison.
+        if write and (
+            ("Origin" in self.headers and not self._origin_ok())
+            or self.headers.get("Sec-Fetch-Site", "").lower() == "cross-site"
+        ):
+            self._json(403, {"error": "请求来源与当前访问地址不一致，请从同一地址重新打开页面。"})
+            return False
+        return True
 
     def _notify_accounts_changed(self) -> None:
         self.hub.broadcast({"type": "accounts_changed"})
@@ -128,7 +206,7 @@ class InboxHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if not self._origin_ok():
-            self._json(403, {"error": "Forbidden"})
+            self._json(403, {"error": "实时连接来源与当前访问地址不一致。"})
             return
         self.send_response(101, "Switching Protocols")
         self.send_header("Upgrade", "websocket")
@@ -146,8 +224,7 @@ class InboxHandler(BaseHTTPRequestHandler):
         if request.path in {"/", "/index.html", "/styles.css", "/app.js"}:
             self._static("/" if request.path == "/index.html" else request.path)
             return
-        if not self._host_ok():
-            self._json(403, {"error": "Forbidden"})
+        if not self._request_allowed():
             return
         if request.path == "/ws":
             self._websocket()
@@ -241,8 +318,7 @@ class InboxHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         request = urlsplit(self.path)
-        if not self._host_ok():
-            self._json(403, {"error": "Forbidden"})
+        if not self._request_allowed(write=True):
             return
         if request.path != "/api/accounts":
             self._json(404, {"error": "Not found"})
@@ -259,8 +335,7 @@ class InboxHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         request = urlsplit(self.path)
-        if not self._host_ok():
-            self._json(403, {"error": "Forbidden"})
+        if not self._request_allowed(write=True):
             return
         match = ACCOUNT_PATH.fullmatch(request.path)
         if not match:
@@ -280,8 +355,7 @@ class InboxHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         request = urlsplit(self.path)
-        if not self._host_ok():
-            self._json(403, {"error": "Forbidden"})
+        if not self._request_allowed(write=True):
             return
         match = ACCOUNT_PATH.fullmatch(request.path)
         if not match:
