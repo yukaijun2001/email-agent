@@ -82,6 +82,24 @@ cd /opt/email-agent
 ./deploy.sh start
 ```
 
+## 一键卸载
+
+卸载命令会删除本项目的容器、网络、应用镜像和 PostgreSQL 数据卷；仍被其他容器使用的镜像会保留。默认保留 `/opt/email-agent` 安装目录（包括 `.docker.env`、`data/` 等本地文件）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/uninstall.sh | \
+  sudo sh -s -- --yes
+```
+
+连同安装目录一起删除：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/uninstall.sh | \
+  sudo sh -s -- --yes --remove-dir
+```
+
+默认 Compose 项目名为 `email-agent`。如果部署时使用自定义目录或项目名，请通过 `--project 项目名` 指定实际名称；连同自定义目录删除时再加 `--remove-dir --dir /实际安装目录`。脚本无需本地源码或 Compose 插件，不会执行全局 Docker 清理；删除失败会返回非零状态并保留安装目录，可以修复后重新运行。
+
 ## 多邮箱
 
 点击右上角“邮箱管理”可以添加、编辑、删除邮箱，数量不限。修改立即生效，不需要重启服务。
