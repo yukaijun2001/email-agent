@@ -40,13 +40,23 @@
 ./deploy.sh status   # 查看容器状态
 ./deploy.sh logs     # 查看应用实时日志，Ctrl+C 退出
 ./deploy.sh restart  # 重新构建并启动
+./deploy.sh repair-db # 修复 PostgreSQL 角色密码，保留数据卷
 ./deploy.sh build    # 仅构建应用镜像
 ./deploy.sh help     # 查看命令帮助
 ```
 
 不带参数时等同于 `./deploy.sh start`。旧命令 `up`、`down` 仍分别兼容为 `start`、`stop`。执行 `stop` 不会删除 PostgreSQL 数据卷；如需彻底删除数据库数据，请单独执行 `docker compose down -v`（或 `docker-compose down -v`）。
 
-可在 `.docker.env` 中修改 `INBOX_PORT`、`POSTGRES_DB` 或 `POSTGRES_USER` 后执行 `./deploy.sh restart`。容器内应用仍监听 8000 端口；`POSTGRES_PASSWORD` 修改后只有新建数据库 volume 时才会生效。
+可在 `.docker.env` 中修改 `INBOX_PORT`、`POSTGRES_DB` 或 `POSTGRES_USER` 后执行 `./deploy.sh restart`。容器内应用仍监听 8000 端口。每次 `start` / `restart` 会在启动应用前通过 PostgreSQL 容器内的管理员连接同步 `POSTGRES_PASSWORD` 对应角色的密码，不会删除或重建数据卷；也可以单独执行 `./deploy.sh repair-db`。`POSTGRES_USER` 必须与现有数据库卷中已经存在的角色一致。
+
+如果旧版本已经出现 `password authentication failed for user "email_agent"`，更新代码后在项目目录执行：
+
+```bash
+./deploy.sh repair-db
+./deploy.sh start
+```
+
+该修复只更新 PostgreSQL 登录角色密码，不会清空邮箱配置或邮件数据。
 
 应用容器通过 `INBOX_DATABASE_URL` 连接 PostgreSQL。邮箱账号和授权码存储在 PostgreSQL 的 `mail_accounts` 表中，前端接口不会返回授权码。
 
