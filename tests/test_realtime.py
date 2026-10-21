@@ -231,6 +231,24 @@ class EndToEndTests(unittest.TestCase):
         self.assertNotIn("password", result)
         self.assertEqual(Config.connection_values(result["id"])[2], "deployed@test")
 
+    def test_outlook_paste_preview_and_import(self):
+        payload = {"text": "user@outlook.com----secret-password----clientid01----secret-token\nbad-row"}
+        status, preview = self._request("POST", "/api/outlook/preview", payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(preview["accounts"][0]["account"], "user@outlook.com")
+        self.assertEqual(Config.snapshot()["accounts"], [])
+        status, result = self._request("POST", "/api/outlook/import", payload)
+        self.assertEqual(status, 201)
+        self.assertEqual(result["added_lines"], [1])
+        self.assertEqual(result["errors"][0]["line"], 2)
+        self.assertEqual(result["added"][0]["protocol"], "outlook_imap")
+        self.assertNotIn("secret-password", json.dumps(result))
+        self.assertNotIn("secret-token", json.dumps(result))
+        status, duplicate = self._request("POST", "/api/outlook/import", payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(duplicate["added"], [])
+        self.assertEqual(len(duplicate["errors"]), 2)
+
     def test_server_deployment_supports_account_crud_at_detected_addresses(self):
         cases = (
             ("203.0.113.10:8080", "http://203.0.113.10:8080"),

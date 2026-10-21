@@ -122,27 +122,39 @@ def parse_graph_import(text: str) -> tuple[list[dict], list[str]]:
 
 
 def _split_graph_line(trimmed: str) -> list[str] | None:
+    # A UUID contains single dashes; match it as a field before splitting.
+    single_dash_uuid = re.fullmatch(
+        r"(.+?@[^\s@]+?)(?<!-)-(?!-)(.+?)(?<!-)-(?!-)"
+        r"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})-(?!-)(.+)",
+        trimmed,
+    )
+    if single_dash_uuid:
+        return [part.strip() for part in single_dash_uuid.groups()]
     for dash_count in range(4, 0, -1):
-        separator = "-" * dash_count
-        pieces = trimmed.split(separator)
-        if len(pieces) == 4:
-            cleaned = [part.strip() for part in pieces]
-            if all(cleaned):
-                return cleaned
-        if len(pieces) > 4:
-            cleaned: list[str] = []
-            remaining = trimmed
-            for _ in range(3):
-                found = remaining.find(separator)
-                if found == -1:
-                    break
-                cleaned.append(remaining[:found].strip())
-                remaining = remaining[found + len(separator):]
-            if len(cleaned) == 3 and remaining.strip():
-                cleaned.append(remaining.strip())
-                if all(cleaned):
-                    return cleaned
+        separator = rf"(?<!-)-{{{dash_count}}}(?!-)"
+        if len(re.findall(separator, trimmed)) >= 3:
+            cleaned = [part.strip() for part in re.split(separator, trimmed, maxsplit=3)]
+            return cleaned if len(cleaned) == 4 and all(cleaned) else None
     return None
+
+
+def _parse_outlook_import(text: str) -> tuple[list[dict], list[dict]]:
+    accounts, errors = [], []
+    for index, line in enumerate(str(text or "").splitlines(), start=1):
+        if not line.strip():
+            continue
+        parsed, issues = parse_graph_import(line)
+        if issues:
+            errors.append({"line": index, "message": issues[0].split("行", 1)[1]})
+            continue
+        item = parsed[0]
+        try:
+            _validate_graph(item["account"], item["password"], item["client_id"], item["refresh_token"])
+        except ValueError as exc:
+            errors.append({"line": index, "message": str(exc)})
+        else:
+            accounts.append({**item, "line": index})
+    return accounts, errors
 
 
 def _validate_graph(account, password, client_id, refresh_token) -> tuple[str, str, str, str]:
@@ -588,6 +600,33 @@ class Config:
                 except ValueError as exc:
                     errors.append(f"{item['account']}：{exc}")
         return {"added": added, "errors": errors}
+
+    @classmethod
+    def preview_outlook_accounts(cls, text: str) -> dict:
+        parsed, errors = _parse_outlook_import(text)
+        return {
+            "accounts": [{key: item[key] for key in ("line", "account", "client_id")} for item in parsed],
+            "errors": errors,
+        }
+
+    @classmethod
+    def import_outlook_accounts(cls, text: str) -> dict:
+        parsed, errors = _parse_outlook_import(text)
+        if not parsed and not errors:
+            raise ValueError("请粘贴至少一行 Outlook 账号。")
+        added, added_lines = [], []
+        with cls._lock:
+            for item in parsed:
+                try:
+                    saved = cls._write_outlook_imap_locked(
+                        None, item["account"], item["client_id"], item["refresh_token"], None,
+                    )
+                except ValueError as exc:
+                    errors.append({"line": item["line"], "message": str(exc)})
+                else:
+                    added.append(saved)
+                    added_lines.append(item["line"])
+        return {"added": added, "added_lines": added_lines, "errors": errors}
 
     @classmethod
     def replace_refresh_token(cls, account_id: str, previous: str, new_token: str) -> None:

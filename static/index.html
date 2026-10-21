@@ -90,7 +90,7 @@
         <ul id="accountList" class="account-list" aria-label="已添加的邮箱"></ul>
         <div class="add-row">
           <button id="addAccountButton" class="button button-light" type="button">添加 IMAP</button>
-          <button id="addOutlookButton" class="button button-dark" type="button">添加 Outlook IMAP</button>
+          <button id="addOutlookButton" class="button button-dark" type="button">添加 Outlook</button>
         </div>
       </div>
       <form id="configForm" class="account-form" hidden>
@@ -116,8 +116,21 @@
           <button id="configSave" class="button button-dark" type="submit">保存并连接</button>
         </div>
       </form>
+      <form id="outlookImportForm" class="account-form outlook-form" hidden>
+        <p class="form-title">添加 Outlook 邮箱</p>
+        <p class="field-hint">粘贴四段账号信息，自动识别后点击添加。支持多行，每行一个邮箱。</p>
+        <label class="field-label" for="outlookImportText">邮箱 — 密码 — Client ID — Refresh Token</label>
+        <textarea id="outlookImportText" class="field-input field-area outlook-import-area" rows="6" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="outlookImportHint" placeholder="user@outlook.com----password123----client-id-here----refresh-token-here&#10;user2@outlook.com--pass--clientid02--token" required></textarea>
+        <p id="outlookImportHint" class="field-hint">分隔符支持 1～4 个短横线（- 到 ----），推荐使用 ----。Token 需包含 Outlook IMAP 权限。</p>
+        <div id="outlookImportPreview" class="import-preview" aria-live="polite"></div>
+        <p id="outlookImportError" class="config-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="outlookImportCancel" class="button button-light" type="button">返回</button>
+          <button id="outlookImportSave" class="button button-dark" type="submit" disabled>添加邮箱</button>
+        </div>
+      </form>
       <form id="outlookForm" class="account-form outlook-form" hidden>
-        <p id="outlookTitle" class="form-title">添加 Outlook IMAP</p>
+        <p id="outlookTitle" class="form-title">添加 Outlook</p>
         <p class="field-hint outlook-lead">使用 OAuth2 + XOAUTH2 连接 <code>outlook.office365.com:993</code>，不会使用邮箱密码或应用密码。</p>
         <label class="field-label" for="graphAccount">邮箱</label>
         <input id="graphAccount" class="field-input" type="text" placeholder="you@outlook.com" autocomplete="username" required>
@@ -224,11 +237,10 @@
             <h4>Outlook / Microsoft 365</h4>
             <ol>
               <li>在 Outlook 网页设置的<strong>邮件 → 转发和 IMAP</strong>中允许设备和应用使用 IMAP。</li>
-              <li>在 Microsoft Entra 中注册应用，允许个人 Microsoft 账号，并打开<strong>允许公共客户端流</strong>。</li>
-              <li>复制应用程序（客户端）ID；无需创建 client secret。</li>
-              <li>点击<strong>添加 Outlook IMAP</strong>，填写邮箱和 Client ID，再点击<strong>开始 Microsoft 授权</strong>。</li>
-              <li>打开设备登录页并输入页面显示的代码。服务会申请 <code>IMAP.AccessAsUser.All</code> 与 <code>offline_access</code>。</li>
-              <li>授权完成后通过 OAuth2/XOAUTH2 只读连接 <code>outlook.office365.com:993</code>，令牌轮换会自动保存。</li>
+              <li>点击<strong>添加 Outlook</strong>，直接粘贴四段信息：<code>邮箱----密码----client_id----refresh_token</code>，每行一个账号。</li>
+              <li>支持 1～4 个短横线分隔，推荐 <code>----</code>；页面会自动显示识别结果，确认后点击<strong>添加邮箱</strong>。</li>
+              <li>Refresh Token 需包含 <code>IMAP.AccessAsUser.All</code> 与 <code>offline_access</code> 权限。邮箱密码用于识别四段格式，连接使用 OAuth2。</li>
+              <li>添加后只读连接 <code>outlook.office365.com:993</code>，令牌轮换会自动保存；已有邮箱可在编辑中重新授权。</li>
             </ol>
           </article>
         </div>

@@ -51,6 +51,11 @@
   const outlookVerificationLink = $("#outlookVerificationLink");
   const outlookAuthStatus = $("#outlookAuthStatus");
   const outlookAdvanced = $("#outlookAdvanced");
+  const outlookImportForm = $("#outlookImportForm");
+  const outlookImportText = $("#outlookImportText");
+  const outlookImportPreview = $("#outlookImportPreview");
+  const outlookImportError = $("#outlookImportError");
+  const outlookImportSave = $("#outlookImportSave");
   const serverInput = $("#imapServer");
   const portInput = $("#imapPort");
   const accountInput = $("#imapAccount");
@@ -483,6 +488,7 @@
 
   // ------------------------------------------------------------------ dialogs
   function showForm(item) {
+    resetOutlookImport();
     state.editing = item ? item.id : "";
     outlookForm.hidden = true;
     accountHome.hidden = true;
@@ -504,6 +510,116 @@
 
   let outlookPollTimer = null;
   let outlookFlowId = "";
+  let outlookImportTimer = null;
+  let outlookImportRevision = 0;
+  let outlookImportBusy = false;
+
+  function resetOutlookImport() {
+    window.clearTimeout(outlookImportTimer);
+    outlookImportRevision += 1;
+    outlookImportForm.hidden = true;
+    outlookImportText.value = "";
+    outlookImportPreview.replaceChildren();
+    outlookImportError.hidden = true;
+    outlookImportSave.disabled = true;
+    outlookImportSave.textContent = "添加邮箱";
+  }
+
+  function showOutlookImport() {
+    hideForm();
+    state.editing = "";
+    accountHome.hidden = true;
+    outlookImportForm.hidden = false;
+    outlookImportText.focus();
+  }
+
+  function renderOutlookPreview(result) {
+    outlookImportPreview.replaceChildren();
+    const summary = document.createElement("p");
+    summary.textContent = `识别到 ${result.accounts.length} 个邮箱${result.errors.length ? `，${result.errors.length} 行需检查` : ""}。确认后点击添加。`;
+    const rows = document.createElement("ul");
+    const entries = [
+      ...result.accounts.map((item) => ({ ...item, message: item.account })),
+      ...result.errors,
+    ].sort((a, b) => a.line - b.line);
+    entries.forEach((item) => {
+      const row = document.createElement("li");
+      row.textContent = `第 ${item.line} 行：${item.message}`;
+      if (!item.account) row.classList.add("import-issue");
+      rows.append(row);
+    });
+    outlookImportPreview.append(summary, rows);
+    outlookImportSave.disabled = !result.accounts.length;
+    outlookImportSave.textContent = result.accounts.length ? `添加 ${result.accounts.length} 个邮箱` : "添加邮箱";
+  }
+
+  async function previewOutlookImport(revision) {
+    try {
+      const result = await api("/api/outlook/preview", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: outlookImportText.value }),
+      });
+      if (revision !== outlookImportRevision || outlookImportForm.hidden) return;
+      renderOutlookPreview(result);
+    } catch (error) {
+      if (revision !== outlookImportRevision || outlookImportForm.hidden) return;
+      outlookImportPreview.replaceChildren();
+      outlookImportError.textContent = error.message;
+      outlookImportError.hidden = false;
+    }
+  }
+
+  function scheduleOutlookPreview() {
+    window.clearTimeout(outlookImportTimer);
+    const revision = ++outlookImportRevision;
+    outlookImportError.hidden = true;
+    outlookImportSave.disabled = true;
+    outlookImportSave.textContent = "添加邮箱";
+    outlookImportPreview.textContent = outlookImportText.value.trim() ? "正在识别…" : "";
+    if (outlookImportText.value.trim()) {
+      outlookImportTimer = window.setTimeout(() => previewOutlookImport(revision), 250);
+    }
+  }
+
+  async function importOutlookAccounts(event) {
+    event.preventDefault();
+    if (outlookImportBusy || outlookImportSave.disabled) return;
+    outlookImportBusy = true;
+    outlookImportRevision += 1;
+    const revision = outlookImportRevision;
+    outlookImportSave.disabled = true;
+    outlookImportSave.textContent = "添加中…";
+    outlookImportText.disabled = true;
+    outlookImportError.hidden = true;
+    const original = outlookImportText.value;
+    try {
+      const result = await api("/api/outlook/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: original }),
+      });
+      if (revision !== outlookImportRevision || outlookImportForm.hidden) return;
+      if (!result.errors.length) {
+        hideForm();
+      } else {
+        const saved = new Set(result.added_lines);
+        outlookImportText.value = original.split(/\r\n|\n|\r/).filter((_, index) => !saved.has(index + 1)).join("\n");
+        scheduleOutlookPreview();
+        outlookImportError.textContent = `已添加 ${result.added.length} 个邮箱，以下行未添加（行号对应提交前的文本）：\n${result.errors.map((item) => `第 ${item.line} 行：${item.message}`).join("\n")}`;
+        outlookImportError.hidden = false;
+      }
+      await loadAccounts();
+      if (result.added.length) await loadEmails();
+    } catch (error) {
+      if (revision !== outlookImportRevision || outlookImportForm.hidden) return;
+      outlookImportError.textContent = error.message;
+      outlookImportError.hidden = false;
+      outlookImportSave.disabled = false;
+      outlookImportSave.textContent = "重试添加";
+    } finally {
+      outlookImportText.disabled = false;
+      outlookImportBusy = false;
+    }
+  }
 
   function resetOutlookFlow() {
     window.clearTimeout(outlookPollTimer);
@@ -518,6 +634,7 @@
 
   function hideForm() {
     resetOutlookFlow();
+    resetOutlookImport();
     state.editing = null;
     form.hidden = true;
     outlookForm.hidden = true;
@@ -527,6 +644,7 @@
   }
 
   function showOutlook(item) {
+    resetOutlookImport();
     resetOutlookFlow();
     state.editing = item ? item.id : "";
     state.outlookProtocol = item && item.protocol === "graph" ? "graph" : "outlook_imap";
@@ -538,7 +656,7 @@
     requestAnimationFrame(() => outlookForm.classList.add("form-enter"));
     outlookTitle.textContent = item
       ? `编辑 Outlook：${item.account}`
-      : "添加 Outlook IMAP";
+      : "添加 Outlook";
     graphAccountInput.value = item ? item.account : "";
     clientIdInput.value = item ? item.client_id || "" : "";
     refreshTokenInput.value = "";
@@ -767,7 +885,10 @@
   }
 
   addAccount.addEventListener("click", () => showForm(null));
-  addOutlook.addEventListener("click", () => showOutlook(null));
+  addOutlook.addEventListener("click", showOutlookImport);
+  outlookImportText.addEventListener("input", scheduleOutlookPreview);
+  outlookImportForm.addEventListener("submit", importOutlookAccounts);
+  $("#outlookImportCancel").addEventListener("click", hideForm);
   outlookCancel.addEventListener("click", hideForm);
   outlookForm.addEventListener("submit", saveOutlook);
   outlookAuthorize.addEventListener("click", startOutlookAuthorization);
@@ -775,7 +896,7 @@
   configCancel.addEventListener("click", hideForm);
   configClose.addEventListener("click", closeConfig);
   dialog.addEventListener("cancel", (event) => {
-    if (!form.hidden || !outlookForm.hidden) {
+    if (!form.hidden || !outlookForm.hidden || !outlookImportForm.hidden) {
       event.preventDefault();
       hideForm();
       return;

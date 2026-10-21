@@ -104,6 +104,48 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(len(snapshot["accounts"]), 60)
         self.assertEqual(len({a["id"] for a in snapshot["accounts"]}), 60)
 
+    def test_outlook_preview_recognizes_all_separators_without_saving_secrets(self):
+        app_id = "11111111-2222-3333-4444-555555555555"
+        for separator in ("-", "--", "---", "----"):
+            with self.subTest(separator=separator):
+                text = separator.join(["user@outlook.com", "pass-word", app_id, "token--with-dashes"])
+                result = Config.preview_outlook_accounts(text)
+                self.assertEqual(result["errors"], [])
+                self.assertEqual(result["accounts"], [{"line": 1, "account": "user@outlook.com", "client_id": app_id}])
+                parsed, _ = parse_graph_import(text)
+                self.assertEqual(parsed[0]["password"], "pass-word")
+                self.assertEqual(parsed[0]["refresh_token"], "token--with-dashes")
+        self.assertEqual(Config.snapshot()["accounts"], [])
+
+    def test_outlook_import_preserves_line_numbers_and_allows_partial_success(self):
+        text = "\n".join([
+            "",
+            "one@outlook.com----secret----clientid01----refresh.token",
+            "not-an-email----secret----clientid02----refresh.token",
+            "one@outlook.com----secret----clientid01----refresh.token",
+            "two@outlook.com----secret----clientid02----refresh.token",
+            "three@outlook.com----secret----short----refresh.token",
+        ])
+        preview = Config.preview_outlook_accounts(text)
+        self.assertEqual([item["line"] for item in preview["errors"]], [3, 6])
+        result = Config.import_outlook_accounts(text)
+        self.assertEqual(result["added_lines"], [2, 5])
+        self.assertEqual(sorted(item["line"] for item in result["errors"]), [3, 4, 6])
+        for account in result["added"]:
+            self.assertEqual(account["protocol"], "outlook_imap")
+            self.assertNotIn("refresh_token", account)
+            self.assertNotIn("password", account)
+            self.assertEqual(Config.mailbox(account["id"])["refresh_token"], "refresh.token")
+        Config.reset_for_tests()
+        self.assertEqual(len(Config.snapshot()["accounts"]), 2)
+
+    def test_outlook_import_rejects_empty_fields_and_empty_input(self):
+        result = Config.preview_outlook_accounts("user@outlook.com--------clientid01----token")
+        self.assertEqual(result["accounts"], [])
+        self.assertEqual(len(result["errors"]), 1)
+        with self.assertRaisesRegex(ValueError, "至少一行"):
+            Config.import_outlook_accounts("\n  \n")
+
 
 if __name__ == "__main__":
     unittest.main()

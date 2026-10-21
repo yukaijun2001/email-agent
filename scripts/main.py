@@ -373,6 +373,21 @@ class InboxHandler(BaseHTTPRequestHandler):
         else:
             self._json(200, result)
 
+    def _outlook_import(self, *, preview: bool = False) -> None:
+        try:
+            text = str(self._request_json(512 * 1024).get("text") or "")
+            result = (config.Config.preview_outlook_accounts(text) if preview
+                      else config.Config.import_outlook_accounts(text))
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        except OSError:
+            self._json(500, {"error": "无法保存邮箱设置。"})
+            return
+        self._json(200 if preview or not result["added"] else 201, result)
+        if not preview and result["added"]:
+            self._notify_accounts_changed()
+
     def _poll_outlook_auth(self) -> None:
         try:
             payload = self._request_json()
@@ -392,6 +407,9 @@ class InboxHandler(BaseHTTPRequestHandler):
             return
         if request.path == "/api/accounts/import":
             self._import_graph_accounts()
+            return
+        if request.path in {"/api/outlook/preview", "/api/outlook/import"}:
+            self._outlook_import(preview=request.path.endswith("/preview"))
             return
         if request.path == "/api/outlook/device/start":
             self._start_outlook_auth()

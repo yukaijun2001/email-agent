@@ -238,7 +238,13 @@ body { background: var(--paper); color: var(--ink); }
 .account-form { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
 .outlook-form { border-top: 0; margin-top: 0; padding-top: 0; }
 .outlook-lead { margin: 8px 0 0; }
-.outlook-import { margin-top: 22px; padding-top: 6px; border-top: 1px solid var(--line); }
+.outlook-import-area { min-height: 150px; overflow-wrap: anywhere; }
+.import-preview { margin-top: 14px; font-size: 12px; line-height: 1.6; }
+.import-preview:empty { display: none; }
+.import-preview p { margin: 0 0 6px; color: var(--muted); }
+.import-preview ul { max-height: 180px; overflow-y: auto; padding-left: 20px; margin: 0; overflow-wrap: anywhere; }
+.import-preview .import-issue { color: var(--danger); }
+.config-error { white-space: pre-line; }
 .device-auth { margin-top: 14px; padding: 16px; border: 1px solid #c4b5fd; border-radius: 6px; background: #faf8ff; }
 .device-auth-title { margin: 0 0 9px; color: #4c1d95; font-size: 12px; font-weight: 650; }
 .device-code { display: block; margin-bottom: 11px; color: #2e1065; font: 700 24px/1.2 var(--mono); letter-spacing: .12em; }
