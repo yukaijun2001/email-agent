@@ -253,6 +253,13 @@ def _parse_fetch(data: list[Any] | None) -> list[tuple[str, bytes]]:
     return results
 
 
+def _uid_sort_key(uid: str) -> tuple:
+    text = str(uid or "")
+    if text.isdigit():
+        return (0, int(text))
+    return (1, text)
+
+
 def _last_number(data: list[Any] | None) -> int | None:
     """Last numeric item of an untagged response (EXISTS may be repeated)."""
     value = None
@@ -307,13 +314,39 @@ class _SessionPool:
     def __init__(self) -> None:
         self._idle: dict[str, list[_Session]] = {}
         self._lock = threading.Lock()
+        self._oauth = None
+
+    def oauth(self):
+        if self._oauth is None:
+            try:
+                from .outlook_imap import OutlookOAuth
+            except ImportError:
+                from outlook_imap import OutlookOAuth
+            self._oauth = OutlookOAuth()
+        return self._oauth
 
     @staticmethod
     def _settings(account_id: str) -> tuple:
         try:
-            return config.Config.connection_values(account_id)
+            account = config.Config.mailbox(account_id)
         except config.AccountNotFound as exc:
-            raise MailboxError("邮箱不存在或已被删除。") from exc
+            # Unit-test fakes and legacy embedders may only provide the older
+            # four-value connection API.
+            try:
+                return ("password", *config.Config.connection_values(account_id))
+            except config.AccountNotFound:
+                raise MailboxError("邮箱不存在或已被删除。") from exc
+        if account.get("protocol") == "outlook_imap":
+            return (
+                "xoauth2",
+                account["imap_server"],
+                account["imap_port"],
+                account["account"],
+                account.get("client_id") or "",
+                account.get("refresh_token") or "",
+            )
+        server, port, username, password = config.Config.connection_values(account_id)
+        return ("password", server, port, username, password)
 
     def acquire(self, account_id: str, fresh: bool = False) -> _Session:
         signature = self._settings(account_id)
@@ -333,24 +366,40 @@ class _SessionPool:
         if session:
             session.reused = True
             return session
-        return _Session(signature, self._connect(signature))
+        return _Session(signature, self._connect(account_id, signature))
 
-    @staticmethod
-    def _connect(signature: tuple) -> Any:
-        server, port, account, password = signature
-        if not server or not account or not password:
+    def _connect(self, account_id: str, signature: tuple) -> Any:
+        auth_kind, server, port, account, *credentials = signature
+        if not server or not account or not credentials or not all(credentials):
             raise MailboxError("请先在浏览器中完成邮箱连接设置。")
         try:
             connection = imaplib.IMAP4_SSL(server, port, timeout=SOCKET_TIMEOUT_SECONDS)
         except Exception as exc:
             raise MailboxError(f"无法连接 {server}:{port}，请检查服务器地址和网络。") from exc
         try:
-            connection.login(account, password)
+            if auth_kind == "xoauth2":
+                oauth = self.oauth()
+                token = oauth.access_token(account_id)
+                try:
+                    from .outlook_imap import xoauth2_bytes
+                except ImportError:
+                    from outlook_imap import xoauth2_bytes
+                connection.authenticate("XOAUTH2", lambda _challenge: xoauth2_bytes(account, token))
+            else:
+                connection.login(account, credentials[0])
+        except MailboxError:
+            try:
+                connection.shutdown()
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             try:
                 connection.shutdown()
             except Exception:
                 pass
+            if auth_kind == "xoauth2":
+                raise MailboxError("Outlook IMAP OAuth2 登录失败，请重新完成 Microsoft 授权。") from exc
             raise MailboxError("IMAP 登录失败，请检查服务器、账号和授权码。") from exc
         return connection
 
@@ -379,6 +428,8 @@ class _SessionPool:
                 self._idle[account_id] = alive
         for session in expired:
             session.close()
+        if self._oauth is not None and keep_ids is not None:
+            self._oauth.prune(keep_ids)
 
     def close_all(self) -> None:
         with self._lock:
@@ -386,6 +437,8 @@ class _SessionPool:
             self._idle.clear()
         for session in sessions:
             session.close()
+        if self._oauth is not None:
+            self._oauth.close()
 
 
 # Errors that mean the TCP/TLS session is unusable (server timeout, network drop).
@@ -404,6 +457,7 @@ class InboxReader:
 
     def __init__(self) -> None:
         self.pool = _SessionPool()
+        self._graph = None
         # (account_id, uidvalidity, uid) -> (public message, _Body)
         self._bodies: OrderedDict[tuple, tuple[dict[str, Any], _Body]] = OrderedDict()
         self._body_bytes = 0
@@ -412,9 +466,29 @@ class InboxReader:
 
     def close(self) -> None:
         self.pool.close_all()
+        if self._graph is not None:
+            self._graph.close()
+
+    def graph(self):
+        if self._graph is None:
+            try:
+                from .graph_reader import GraphClient
+            except ImportError:
+                from graph_reader import GraphClient
+            self._graph = GraphClient()
+        return self._graph
+
+    def _use_graph(self, account_id: str) -> bool:
+        try:
+            return config.Config.is_graph(account_id)
+        except config.AccountNotFound:
+            return False
 
     def prune(self) -> None:
-        self.pool.prune(set(config.Config.account_ids()))
+        keep = set(config.Config.account_ids())
+        self.pool.prune(keep)
+        if self._graph is not None:
+            self._graph.prune(keep)
         with self._cache_lock:
             known = set(config.Config.account_ids())
             for key in [k for k in self._bodies if k[0] not in known]:
@@ -477,6 +551,8 @@ class InboxReader:
     def list_messages(self, account_id: str, limit: int = 50) -> list[dict[str, Any]]:
         """Most recent ``limit`` INBOX messages of one account, newest first."""
         limit = max(1, min(int(limit), 100))
+        if self._use_graph(account_id):
+            return self.graph().list_messages(account_id, limit)
 
         def action(session: _Session):
             exists, _validity, _uidnext = self._examine(account_id, session)
@@ -525,7 +601,7 @@ class InboxReader:
             merged.extend(messages)
             if error:
                 errors.append({"account_id": account_id, "error": error})
-        merged.sort(key=lambda item: (item["timestamp"], int(item["uid"])), reverse=True)
+        merged.sort(key=lambda item: (item["timestamp"], _uid_sort_key(item["uid"])), reverse=True)
         return merged[:limit], errors
 
     def check_new(
@@ -538,6 +614,8 @@ class InboxReader:
         A check that finds nothing new costs a single EXAMINE when the server
         reports UIDNEXT.
         """
+        if self._use_graph(account_id):
+            return self.graph().check_new(account_id, known_validity, last_uid)
 
         def action(session: _Session):
             connection = session.connection
@@ -600,6 +678,19 @@ class InboxReader:
                 self._evict(next(iter(self._bodies)))
 
     def _load(self, account_id: str, uid: str) -> tuple[dict[str, Any], _Body] | None:
+        if self._use_graph(account_id):
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,800}", uid):
+                return None
+            with self._cache_lock:
+                self._validity[account_id] = "graph"
+            cached = self._cached(account_id, uid)
+            if cached:
+                return cached
+            loaded = self.graph().load_message(account_id, uid)
+            if loaded is None:
+                return None
+            self._store(account_id, uid, loaded)
+            return loaded
         if not re.fullmatch(r"[0-9]{1,20}", uid):
             return None
         cached = self._cached(account_id, uid)

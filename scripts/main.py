@@ -21,8 +21,8 @@ except ImportError:  # Running scripts/main.py directly.
 
 STATIC_DIR = config.ROOT_DIR / "static"
 ACCOUNT_PATH = re.compile(r"/api/accounts/([0-9a-f]{8})")
-MESSAGE_PATH = re.compile(r"/api/accounts/([0-9a-f]{8})/emails/([0-9]{1,20})")
-MESSAGE_HTML_PATH = re.compile(r"/api/accounts/([0-9a-f]{8})/emails/([0-9]{1,20})/html")
+MESSAGE_PATH = re.compile(r"/api/accounts/([0-9a-f]{8})/emails/([A-Za-z0-9_-]{1,800})")
+MESSAGE_HTML_PATH = re.compile(r"/api/accounts/([0-9a-f]{8})/emails/([A-Za-z0-9_-]{1,800})/html")
 PAGE_CSP = (
     "default-src 'self'; img-src 'self' data:; style-src 'self'; frame-src 'self'; "
     "script-src 'self'; connect-src 'self'; base-uri 'none'; "
@@ -89,7 +89,7 @@ class InboxHandler(BaseHTTPRequestHandler):
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self._respond(status, body, "application/json; charset=utf-8")
 
-    def _request_json(self) -> dict:
+    def _request_json(self, max_size: int = 64 * 1024) -> dict:
         try:
             size = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
@@ -97,7 +97,7 @@ class InboxHandler(BaseHTTPRequestHandler):
         content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
         if content_type != "application/json":
             raise ValueError("请求内容必须是 JSON。")
-        if size < 1 or size > 16 * 1024:
+        if size < 1 or size > max_size:
             raise ValueError("请求内容无效。")
         try:
             payload = json.loads(self.rfile.read(size).decode("utf-8"))
@@ -308,23 +308,102 @@ class InboxHandler(BaseHTTPRequestHandler):
         self._respond(status, document.encode("utf-8"), "text/html; charset=utf-8", MAIL_CSP)
 
     # ------------------------------------------------------------------ writes
-    def _account_fields(self, payload: dict) -> tuple:
-        return (
+    def _create_account(self, payload: dict) -> dict:
+        protocol = str(payload.get("protocol") or "imap").strip().lower()
+        if protocol == "graph":
+            return config.Config.add_graph_account(
+                payload.get("account", ""),
+                payload.get("password"),
+                payload.get("client_id", ""),
+                payload.get("refresh_token", ""),
+            )
+        if protocol == "outlook_imap":
+            return config.Config.add_outlook_imap_account(
+                payload.get("account", ""),
+                payload.get("client_id", ""),
+                payload.get("refresh_token", ""),
+            )
+        return config.Config.add_account(
             payload.get("imap_server", ""),
             payload.get("imap_port", 993),
             payload.get("account", ""),
             payload.get("password"),
         )
 
+    def _update_account(self, account_id: str, payload: dict) -> dict:
+        return config.Config.update_account(
+            account_id,
+            payload.get("imap_server", ""),
+            payload.get("imap_port", 993),
+            payload.get("account", ""),
+            payload.get("password"),
+            payload.get("protocol"),
+            payload.get("client_id") if "client_id" in payload else None,
+            payload.get("refresh_token") if "refresh_token" in payload else None,
+        )
+
+    def _import_graph_accounts(self) -> None:
+        try:
+            result = config.Config.import_graph_accounts(str(self._request_json(512 * 1024).get("text") or ""))
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        except OSError:
+            self._json(500, {"error": "无法保存邮箱设置。"})
+            return
+        if not result["added"]:
+            message = result["errors"][0] if len(result["errors"]) == 1 else "没有导入成功的邮箱。"
+            self._json(400, {"error": message, "errors": result["errors"]})
+            return
+        self._json(201, result)
+        self._notify_accounts_changed()
+
+    def _start_outlook_auth(self) -> None:
+        try:
+            payload = self._request_json()
+            result = self.reader.pool.oauth().start_device_flow(
+                payload.get("account", ""),
+                payload.get("client_id", ""),
+                payload.get("account_id") or None,
+            )
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+        except MailboxError as exc:
+            self._json(503, {"error": str(exc)})
+        else:
+            self._json(200, result)
+
+    def _poll_outlook_auth(self) -> None:
+        try:
+            payload = self._request_json()
+            result = self.reader.pool.oauth().poll_device_flow(payload.get("flow_id", ""))
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+        except MailboxError as exc:
+            self._json(503, {"error": str(exc)})
+        else:
+            self._json(200, result)
+            if result.get("status") == "complete":
+                self._notify_accounts_changed()
+
     def do_POST(self) -> None:
         request = urlsplit(self.path)
         if not self._request_allowed(write=True):
+            return
+        if request.path == "/api/accounts/import":
+            self._import_graph_accounts()
+            return
+        if request.path == "/api/outlook/device/start":
+            self._start_outlook_auth()
+            return
+        if request.path == "/api/outlook/device/poll":
+            self._poll_outlook_auth()
             return
         if request.path != "/api/accounts":
             self._json(404, {"error": "Not found"})
             return
         try:
-            created = config.Config.add_account(*self._account_fields(self._request_json()))
+            created = self._create_account(self._request_json())
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
         except OSError:
@@ -342,7 +421,7 @@ class InboxHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "Not found"})
             return
         try:
-            updated = config.Config.update_account(match.group(1), *self._account_fields(self._request_json()))
+            updated = self._update_account(match.group(1), self._request_json())
         except config.AccountNotFound:
             self._json(404, {"error": "邮箱不存在或已被删除。"})
         except ValueError as exc:
@@ -385,7 +464,7 @@ def main() -> None:
     watcher.start()
     print("只读收件箱已启动: http://%s:%s" % (config.APP_HOST, config.APP_PORT))
     print("WebSocket 推送: ws://%s:%s/ws（每 %s 秒检查新邮件）" % (config.APP_HOST, config.APP_PORT, config.POLL_INTERVAL_SECONDS))
-    print("仅读取 IMAP INBOX，按 Ctrl+C 停止。")
+    print("IMAP、Outlook IMAP OAuth2 与 Outlook Graph 均只读取 INBOX，按 Ctrl+C 停止。")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

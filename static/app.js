@@ -6,6 +6,7 @@
     selected: null,      // "<account_id>:<uid>"
     filter: "all",
     editing: null,       // account id being edited, "" for a new one, null when form hidden
+    outlookProtocol: "outlook_imap",
     fresh: new Set(),    // keys of messages pushed over WebSocket, highlighted until opened
     animatedRows: new Set(),
     animatedMailboxes: new Set(),
@@ -29,10 +30,27 @@
   const help = $("#helpButton");
   const settings = $("#settingsButton");
   const dialog = $("#configDialog");
+  const accountHome = $("#accountHome");
   const accountList = $("#accountList");
   const addAccount = $("#addAccountButton");
+  const addOutlook = $("#addOutlookButton");
   const form = $("#configForm");
   const formTitle = $("#formTitle");
+  const outlookForm = $("#outlookForm");
+  const outlookTitle = $("#outlookTitle");
+  const graphAccountInput = $("#graphAccount");
+  const clientIdInput = $("#graphClientId");
+  const refreshTokenInput = $("#graphRefreshToken");
+  const outlookHint = $("#outlookHint");
+  const outlookError = $("#outlookError");
+  const outlookSave = $("#outlookSave");
+  const outlookCancel = $("#outlookCancel");
+  const outlookAuthorize = $("#outlookAuthorize");
+  const outlookDevice = $("#outlookDevice");
+  const outlookUserCode = $("#outlookUserCode");
+  const outlookVerificationLink = $("#outlookVerificationLink");
+  const outlookAuthStatus = $("#outlookAuthStatus");
+  const outlookAdvanced = $("#outlookAdvanced");
   const serverInput = $("#imapServer");
   const portInput = $("#imapPort");
   const accountInput = $("#imapAccount");
@@ -51,6 +69,11 @@
 
   const EMPTY_DETAIL = '<div class="empty-detail"><span class="detail-mark" aria-hidden="true">/</span><h2>选择一封邮件</h2><p>点击右侧邮件卡片查看完整信息</p></div>';
   const keyOf = (email) => `${email.account_id}:${email.uid}`;
+  const shortUid = (uid) => {
+    const text = String(uid || "");
+    return text.length > 12 ? `#${text.slice(-6)}` : `#${text}`;
+  };
+  const uidRank = (uid) => (/^[0-9]{1,15}$/.test(String(uid || "")) ? Number(uid) : 0);
 
   function updateHeaderOnScroll() {
     document.body.classList.toggle("scrolled", window.scrollY > 20);
@@ -144,8 +167,14 @@
       row.className = "account-item";
       row.innerHTML = '<div class="account-info"><strong></strong><span></span></div><div class="account-actions"><button type="button" class="button button-quiet" data-action="edit">编辑</button><button type="button" class="button button-quiet danger" data-action="delete">删除</button></div>';
       row.querySelector("strong").textContent = item.account;
-      row.querySelector("span").textContent = `${item.imap_server}:${item.imap_port}`;
-      row.querySelector('[data-action="edit"]').addEventListener("click", () => showForm(item));
+      row.querySelector("span").textContent = item.protocol === "graph"
+        ? "Outlook · Graph"
+        : item.protocol === "outlook_imap"
+          ? "Outlook · IMAP OAuth2"
+          : `${item.imap_server}:${item.imap_port}`;
+      row.querySelector('[data-action="edit"]').addEventListener("click", () => (
+        ["graph", "outlook_imap"].includes(item.protocol) ? showOutlook(item) : showForm(item)
+      ));
       row.querySelector('[data-action="delete"]').addEventListener("click", () => deleteAccount(item));
       return row;
     }));
@@ -216,7 +245,7 @@
       row.querySelector(".preview").textContent = email.from || "来自未知发件人的邮件";
       const tag = row.querySelector(".account-tag");
       tag.textContent = accountTitle(email.account_id);
-      row.querySelector(".uid").textContent = `#${email.uid}`;
+      row.querySelector(".uid").textContent = shortUid(email.uid);
       row.addEventListener("click", () => openMessage(email));
       return row;
     }));
@@ -277,7 +306,7 @@
     wrapper.querySelector(".from").textContent = message.from || "未知发件人";
     wrapper.querySelector(".date").textContent = message.date || "未知日期";
     wrapper.querySelector(".mailbox").textContent = accountTitle(message.account_id);
-    wrapper.querySelector(".uid").textContent = `#${message.uid}`;
+    wrapper.querySelector(".uid").textContent = shortUid(message.uid);
     const recipients = wrapper.querySelector(".detail-recipients");
     for (const [label, value] of [["收件人", message.to], ["抄送", message.cc]]) {
       if (!value) continue;
@@ -313,7 +342,7 @@
 
   function sortEmails(emails) {
     return emails
-      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0) || Number(b.uid) - Number(a.uid))
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0) || uidRank(b.uid) - uidRank(a.uid))
       .slice(0, LIMIT);
   }
 
@@ -455,12 +484,13 @@
   // ------------------------------------------------------------------ dialogs
   function showForm(item) {
     state.editing = item ? item.id : "";
+    outlookForm.hidden = true;
+    accountHome.hidden = true;
     configError.hidden = true;
     form.hidden = false;
     form.classList.remove("form-enter");
     requestAnimationFrame(() => form.classList.add("form-enter"));
-    addAccount.hidden = true;
-    formTitle.textContent = item ? `编辑：${item.account}` : "添加邮箱";
+    formTitle.textContent = item ? `编辑：${item.account}` : "添加 IMAP 邮箱";
     serverInput.value = item ? item.imap_server : "";
     portInput.value = item ? item.imap_port : 993;
     accountInput.value = item ? item.account : "";
@@ -472,11 +502,57 @@
     serverInput.focus();
   }
 
+  let outlookPollTimer = null;
+  let outlookFlowId = "";
+
+  function resetOutlookFlow() {
+    window.clearTimeout(outlookPollTimer);
+    outlookPollTimer = null;
+    outlookFlowId = "";
+    outlookDevice.hidden = true;
+    outlookUserCode.textContent = "";
+    outlookAuthStatus.textContent = "等待授权…";
+    outlookAuthorize.disabled = false;
+    outlookAuthorize.textContent = "开始 Microsoft 授权";
+  }
+
   function hideForm() {
+    resetOutlookFlow();
     state.editing = null;
     form.hidden = true;
-    addAccount.hidden = false;
+    outlookForm.hidden = true;
+    accountHome.hidden = false;
     configError.hidden = true;
+    outlookError.hidden = true;
+  }
+
+  function showOutlook(item) {
+    resetOutlookFlow();
+    state.editing = item ? item.id : "";
+    state.outlookProtocol = item && item.protocol === "graph" ? "graph" : "outlook_imap";
+    form.hidden = true;
+    accountHome.hidden = true;
+    outlookError.hidden = true;
+    outlookForm.hidden = false;
+    outlookForm.classList.remove("form-enter");
+    requestAnimationFrame(() => outlookForm.classList.add("form-enter"));
+    outlookTitle.textContent = item
+      ? `编辑 Outlook：${item.account}`
+      : "添加 Outlook IMAP";
+    graphAccountInput.value = item ? item.account : "";
+    clientIdInput.value = item ? item.client_id || "" : "";
+    refreshTokenInput.value = "";
+    refreshTokenInput.required = false;
+    const legacyGraph = state.outlookProtocol === "graph";
+    outlookAuthorize.hidden = legacyGraph;
+    outlookAdvanced.open = legacyGraph;
+    outlookHint.textContent = legacyGraph
+      ? "这是已有的 Graph 账号；可留空 refresh token 保留原值。新 Outlook 账号默认使用 IMAP OAuth2。"
+      : item
+        ? "点击开始授权可更换 OAuth2 凭据；已有 refresh token 也可以在高级区域直接保存。"
+        : "应用需允许个人 Microsoft 账号并启用公共客户端流；无需填写邮箱密码。";
+    outlookSave.textContent = legacyGraph ? "保存 Graph 设置" : "保存已有 Token";
+    graphAccountInput.focus();
   }
 
   let configCloseTimer = null;
@@ -486,8 +562,8 @@
     try { await loadAccounts(); } catch (_) { /* keep last known list */ }
     configIntro.textContent = state.accounts.length
       ? "可以添加多个邮箱，收件箱会合并显示所有邮箱的邮件。"
-      : "首次使用：添加一个 IMAP 邮箱，保存后立即同步收件箱。";
-    if (state.accounts.length) hideForm(); else showForm(null);
+      : "添加 IMAP 邮箱，或单独添加 Outlook。";
+    hideForm();
     clearTimeout(configCloseTimer);
     dialog.classList.remove("is-closing");
     if (typeof dialog.showModal === "function") { if (!dialog.open) dialog.showModal(); }
@@ -539,6 +615,7 @@
     const editing = state.editing;
     try {
       const body = JSON.stringify({
+        protocol: "imap",
         imap_server: serverInput.value.trim(),
         imap_port: Number(portInput.value),
         account: accountInput.value.trim(),
@@ -599,11 +676,113 @@
   help.addEventListener("click", openHelp);
   helpClose.addEventListener("click", closeHelp);
   settings.addEventListener("click", openConfig);
+
+  async function pollOutlookAuthorization(delaySeconds) {
+    window.clearTimeout(outlookPollTimer);
+    outlookPollTimer = window.setTimeout(async () => {
+      if (!outlookFlowId || outlookForm.hidden) return;
+      try {
+        const result = await api("/api/outlook/device/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ flow_id: outlookFlowId }),
+        });
+        if (result.status === "complete") {
+          outlookAuthStatus.textContent = "授权完成，正在读取 INBOX…";
+          outlookFlowId = "";
+          await loadAccounts();
+          hideForm();
+          await loadEmails();
+          return;
+        }
+        outlookAuthStatus.textContent = "等待你在 Microsoft 页面完成授权…";
+        pollOutlookAuthorization(Number(result.retry_after) || 5);
+      } catch (error) {
+        outlookFlowId = "";
+        outlookAuthorize.disabled = false;
+        outlookAuthorize.textContent = "重新开始授权";
+        outlookError.hidden = false;
+        outlookError.textContent = error.message;
+        outlookAuthStatus.textContent = "授权未完成。";
+      }
+    }, Math.max(1, Number(delaySeconds) || 5) * 1000);
+  }
+
+  async function startOutlookAuthorization() {
+    outlookError.hidden = true;
+    outlookAuthorize.disabled = true;
+    outlookAuthorize.textContent = "正在创建授权…";
+    try {
+      const result = await api("/api/outlook/device/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account: graphAccountInput.value.trim(),
+          client_id: clientIdInput.value.trim(),
+          account_id: state.editing || "",
+        }),
+      });
+      outlookFlowId = result.flow_id;
+      outlookUserCode.textContent = result.user_code;
+      const verification = new URL(result.verification_uri);
+      if (verification.protocol !== "https:") throw new Error("Microsoft 返回了无效的授权地址。");
+      outlookVerificationLink.href = verification.href;
+      outlookDevice.hidden = false;
+      outlookAuthStatus.textContent = "等待你在 Microsoft 页面完成授权…";
+      outlookAuthorize.textContent = "授权进行中";
+      pollOutlookAuthorization(Number(result.interval) || 5);
+    } catch (error) {
+      resetOutlookFlow();
+      outlookError.hidden = false;
+      outlookError.textContent = error.message;
+    }
+  }
+
+  async function saveOutlook(event) {
+    event.preventDefault();
+    outlookError.hidden = true;
+    outlookSave.disabled = true;
+    outlookSave.textContent = "保存中…";
+    const editing = state.editing;
+    try {
+      const body = JSON.stringify({
+        protocol: state.outlookProtocol,
+        account: graphAccountInput.value.trim(),
+        password: "",
+        client_id: clientIdInput.value.trim(),
+        refresh_token: refreshTokenInput.value.trim(),
+      });
+      const path = editing ? `/api/accounts/${encodeURIComponent(editing)}` : "/api/accounts";
+      await api(path, { method: editing ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body });
+      await loadAccounts();
+      hideForm();
+      await loadEmails();
+    } catch (error) {
+      outlookError.hidden = false;
+      outlookError.textContent = error.message;
+    } finally {
+      outlookSave.disabled = false;
+      outlookSave.textContent = state.outlookProtocol === "graph" ? "保存 Graph 设置" : "保存已有 Token";
+    }
+  }
+
   addAccount.addEventListener("click", () => showForm(null));
+  addOutlook.addEventListener("click", () => showOutlook(null));
+  outlookCancel.addEventListener("click", hideForm);
+  outlookForm.addEventListener("submit", saveOutlook);
+  outlookAuthorize.addEventListener("click", startOutlookAuthorization);
   form.addEventListener("submit", saveConfig);
-  configCancel.addEventListener("click", () => (state.accounts.length ? hideForm() : closeConfig()));
+  configCancel.addEventListener("click", hideForm);
   configClose.addEventListener("click", closeConfig);
-  dialog.addEventListener("cancel", (event) => { event.preventDefault(); closeConfig(); });
+  dialog.addEventListener("cancel", (event) => {
+    if (!form.hidden || !outlookForm.hidden) {
+      event.preventDefault();
+      hideForm();
+      return;
+    }
+    event.preventDefault();
+    closeConfig();
+  });
   helpDialog.addEventListener("cancel", (event) => { event.preventDefault(); closeHelp(); });
   messageClose.addEventListener("click", closeMessage);
   messageDialog.addEventListener("cancel", (event) => { event.preventDefault(); closeMessage(); });

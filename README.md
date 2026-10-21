@@ -1,6 +1,6 @@
 # 只读收件箱
 
-一个本地运行的邮箱收件箱查看器。通过 IMAP SSL 同时读取多个邮箱的 `INBOX`，并通过 WebSocket 把新邮件实时推送到浏览器。不会发送、回复、删除、移动邮件，也不会修改已读状态（所有读取都使用 `BODY.PEEK` 和只读 `SELECT`）。
+一个本地运行的邮箱收件箱查看器。普通邮箱通过 IMAP SSL 读取 `INBOX`；Outlook 使用 OAuth2 + SASL XOAUTH2 连接 `outlook.office365.com:993`。新邮件经 WebSocket 推送到浏览器。不会发送、回复、删除、移动邮件，也不会修改已读状态。
 
 ## 启动
 
@@ -8,7 +8,17 @@
 ./inbox.sh start
 ```
 
-浏览器打开 <http://127.0.0.1:8000>。首次打开会显示“邮箱管理”，填写 IMAP 服务器、端口、邮箱账号和授权码/应用密码后点击“保存并连接”。配置保存在项目目录的本地 `inbox_config.json`（仅当前用户可读），授权码不会通过任何接口返回给网页。
+浏览器打开 <http://127.0.0.1:8000>。首次打开会显示“邮箱管理”。普通 IMAP 邮箱填写服务器、端口、账号和授权码。Outlook 填写邮箱和 Microsoft 应用的 Client ID，然后按页面提示完成设备代码授权；服务使用 access token 执行 IMAP `AUTHENTICATE XOAUTH2`。配置保存在本地 `inbox_config.json`（仅当前用户可读），密码和 refresh_token 不会通过接口返回给网页。令牌轮换后新的 refresh_token 会写回原账号。
+
+### Outlook IMAP OAuth2 准备
+
+1. 在 Outlook 网页设置的“邮件 → 转发和 IMAP”中允许设备和应用使用 IMAP。
+2. 在 Microsoft Entra 注册应用；受支持账号类型需包含“个人 Microsoft 账号”。
+3. 在“身份验证”中启用“允许公共客户端流”。设备代码流不需要 client secret 或回调地址。
+4. 在邮箱管理中点击“添加 Outlook IMAP”，填写邮箱和应用程序（客户端）ID。
+5. 点击“开始 Microsoft 授权”，打开显示的设备登录页并输入代码。应用请求 `offline_access` 与 `https://outlook.office.com/IMAP.AccessAsUser.All`。
+
+Outlook 的普通密码和 16 位应用密码不能用于这条链路；服务器明确返回 `LOGINDISABLED` 时必须使用 OAuth2。设备代码和 access token 只保存在进程内存，持久化存储中只保存 refresh token。
 
 管理服务：
 
@@ -100,21 +110,21 @@ cd /opt/email-agent
 
 ## 一键卸载
 
-卸载命令会删除本项目的容器、网络、应用镜像和 PostgreSQL 数据卷；仍被其他容器使用的镜像会保留。默认保留 `/opt/email-agent` 安装目录（包括 `.docker.env`、`data/` 等本地文件）：
+卸载命令会删除本项目的容器、网络和应用镜像，并保留 PostgreSQL 数据卷，方便卸掉旧容器后重新部署且不丢数据；仍被其他容器使用的镜像会保留。默认也保留 `/opt/email-agent` 安装目录（包括 `.docker.env`、`data/` 等本地文件）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/uninstall.sh | \
   sudo sh -s -- --yes
 ```
 
-连同安装目录一起删除：
+连同安装目录一起删除（仍保留 PostgreSQL 数据卷）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/uninstall.sh | \
   sudo sh -s -- --yes --remove-dir
 ```
 
-默认 Compose 项目名为 `email-agent`。如果部署时使用自定义目录或项目名，请通过 `--project 项目名` 指定实际名称；连同自定义目录删除时再加 `--remove-dir --dir /实际安装目录`。脚本无需本地源码或 Compose 插件，不会执行全局 Docker 清理；删除失败会返回非零状态并保留安装目录，可以修复后重新运行。
+只有需要清空数据库时才额外加上 `--remove-volumes`。默认 Compose 项目名为 `email-agent`。如果部署时使用自定义目录或项目名，请通过 `--project 项目名` 指定实际名称；连同自定义目录删除时再加 `--remove-dir --dir /实际安装目录`。脚本无需本地源码或 Compose 插件，不会执行全局 Docker 清理；删除失败会返回非零状态并保留安装目录，可以修复后重新运行。
 
 ## 多邮箱
 

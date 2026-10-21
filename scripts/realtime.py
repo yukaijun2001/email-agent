@@ -240,10 +240,17 @@ class MailWatcher(threading.Thread):
 
     def _signature(self, account_id: str) -> tuple:
         try:
-            server, port, account, _password = config.Config.connection_values(account_id)
+            account = config.Config.mailbox(account_id)
         except config.AccountNotFound:
             return ()
-        return server.lower(), port, account.lower()
+        if account.get("protocol") == "graph":
+            return ("graph", account["account"].lower(), account.get("client_id") or "")
+        if account.get("protocol") == "outlook_imap":
+            return (
+                "outlook_imap", account["account"].lower(), account.get("client_id") or "",
+                account.get("refresh_token") or "",
+            )
+        return (account["imap_server"].lower(), account["imap_port"], account["account"].lower())
 
     def check_account(self, account_id: str) -> None:
         signature = self._signature(account_id)

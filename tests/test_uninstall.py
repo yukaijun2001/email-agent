@@ -162,8 +162,17 @@ class UninstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(set(self.state["containers"]), {"foreign"})
         self.assertEqual(set(self.state["networks"]), {"other_default"})
-        self.assertEqual(set(self.state["volumes"]), {"other_data", "email-agent_postgres_data_backup"})
+        self.assertEqual(
+            set(self.state["volumes"]),
+            {
+                "email-agent_postgres_data",
+                "email-agent_cache",
+                "other_data",
+                "email-agent_postgres_data_backup",
+            },
+        )
         self.assertEqual(set(self.state["images"]), {"sha256:other"})
+        self.assertIn("保留数据卷: email-agent_postgres_data", result.stdout)
         self.assertIn("卸载完成", result.stdout)
 
     def test_repeat_uninstall_succeeds_when_resources_are_absent(self):
@@ -198,11 +207,12 @@ class UninstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("sha256:previous", self.state["images"])
 
-    def test_removes_unlabelled_legacy_volume(self):
+    def test_keeps_unlabelled_legacy_volume(self):
         self.state["volumes"]["email-agent_postgres_data"] = {}
         result = self.run_uninstall("--yes")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("email-agent_postgres_data", self.state["volumes"])
+        self.assertIn("email-agent_postgres_data", self.state["volumes"])
+        self.assertIn("保留数据卷: email-agent_postgres_data", result.stdout)
 
     def test_keeps_legacy_named_volume_owned_by_another_project(self):
         self.state["volumes"]["email-agent_postgres_data"] = {"project": "other"}
@@ -219,7 +229,7 @@ class UninstallTests(unittest.TestCase):
         result = self.run_uninstall("--yes", "--project", "custom")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("custom", self.state["containers"])
-        self.assertNotIn("custom_postgres_data", self.state["volumes"])
+        self.assertIn("custom_postgres_data", self.state["volumes"])
         self.assertNotIn("custom_default", self.state["networks"])
         self.assertNotIn("sha256:custom", self.state["images"])
         self.assertIn("inbox", self.state["containers"])
@@ -267,7 +277,7 @@ class UninstallTests(unittest.TestCase):
     def test_delete_failures_return_error_and_preserve_install_directory(self):
         folder = self.make_install_dir()
         initial_state = copy.deepcopy(self.state)
-        for failure in (["rm"], ["network", "rm"], ["volume", "rm"], ["image", "rm"]):
+        for failure in (["rm"], ["network", "rm"], ["image", "rm"]):
             with self.subTest(failure=failure):
                 self.state = copy.deepcopy(initial_state)
                 self.state["fail"] = [failure]
@@ -276,6 +286,22 @@ class UninstallTests(unittest.TestCase):
                 self.assertNotIn("卸载完成", result.stdout)
                 self.assertIn("删除失败", result.stderr)
                 self.assertTrue(folder.exists())
+
+    def test_remove_volumes_deletes_only_when_requested(self):
+        result = self.run_uninstall("--yes", "--remove-volumes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(set(self.state["volumes"]), {"other_data", "email-agent_postgres_data_backup"})
+        self.assertIn("已删除数据卷: email-agent_postgres_data", result.stdout)
+
+    def test_volume_delete_failure_preserves_install_directory(self):
+        folder = self.make_install_dir()
+        self.state["fail"] = [["volume", "rm"]]
+        result = self.run_uninstall("--yes", "--remove-volumes", "--remove-dir", "--dir", str(folder))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("卸载完成", result.stdout)
+        self.assertIn("删除失败", result.stderr)
+        self.assertTrue(folder.exists())
+        self.assertIn("email-agent_postgres_data", self.state["volumes"])
 
     def test_query_failure_prevents_resource_deletion(self):
         self.state["fail"] = [["volume", "ls"]]

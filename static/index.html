@@ -73,7 +73,7 @@
   </main>
 
   <footer class="footer">
-    <span>IMAP SSL · 实时同步</span>
+    <span>IMAP / Outlook Graph · 实时同步</span>
     <span>只读模式已启用</span>
   </footer>
   <dialog id="configDialog" class="config-dialog">
@@ -85,9 +85,14 @@
         </div>
         <button id="configClose" class="dialog-close" type="button" aria-label="关闭邮箱管理">×</button>
       </div>
-      <p id="configIntro" class="dialog-intro">可以添加多个邮箱，收件箱会合并显示所有邮箱的邮件。</p>
-      <ul id="accountList" class="account-list" aria-label="已添加的邮箱"></ul>
-      <button id="addAccountButton" class="button button-light add-account" type="button">＋ 添加邮箱</button>
+      <div id="accountHome">
+        <p id="configIntro" class="dialog-intro">可以添加多个邮箱，收件箱会合并显示所有邮箱的邮件。</p>
+        <ul id="accountList" class="account-list" aria-label="已添加的邮箱"></ul>
+        <div class="add-row">
+          <button id="addAccountButton" class="button button-light" type="button">添加 IMAP</button>
+          <button id="addOutlookButton" class="button button-dark" type="button">添加 Outlook IMAP</button>
+        </div>
+      </div>
       <form id="configForm" class="account-form" hidden>
         <p id="formTitle" class="form-title">添加邮箱</p>
         <label class="field-label" for="imapServer">IMAP 服务器</label>
@@ -109,6 +114,33 @@
         <div class="dialog-actions">
           <button id="configCancel" class="button button-light" type="button">取消</button>
           <button id="configSave" class="button button-dark" type="submit">保存并连接</button>
+        </div>
+      </form>
+      <form id="outlookForm" class="account-form outlook-form" hidden>
+        <p id="outlookTitle" class="form-title">添加 Outlook IMAP</p>
+        <p class="field-hint outlook-lead">使用 OAuth2 + XOAUTH2 连接 <code>outlook.office365.com:993</code>，不会使用邮箱密码或应用密码。</p>
+        <label class="field-label" for="graphAccount">邮箱</label>
+        <input id="graphAccount" class="field-input" type="text" placeholder="you@outlook.com" autocomplete="username" required>
+        <label class="field-label" for="graphClientId">Client ID</label>
+        <input id="graphClientId" class="field-input" type="text" placeholder="应用程序（客户端）ID" autocomplete="off" spellcheck="false" required>
+        <p id="outlookHint" class="field-hint">应用需允许个人 Microsoft 账号、启用公共客户端流；授权范围为 IMAP.AccessAsUser.All 和 offline_access。</p>
+        <button id="outlookAuthorize" class="button button-dark add-account" type="button">开始 Microsoft 授权</button>
+        <section id="outlookDevice" class="device-auth" aria-live="polite" hidden>
+          <p class="device-auth-title">在 Microsoft 页面输入代码</p>
+          <code id="outlookUserCode" class="device-code"></code>
+          <a id="outlookVerificationLink" class="device-link" href="https://microsoft.com/devicelogin" target="_blank" rel="noopener noreferrer">打开 Microsoft 设备登录页 ↗</a>
+          <p id="outlookAuthStatus" class="field-hint">等待授权…</p>
+        </section>
+        <details id="outlookAdvanced" class="outlook-advanced">
+          <summary>已有 refresh_token</summary>
+          <label class="field-label" for="graphRefreshToken">Refresh Token</label>
+          <textarea id="graphRefreshToken" class="field-input field-area" rows="3" spellcheck="false" autocomplete="off"></textarea>
+          <p class="field-hint">可直接保存已包含 Outlook IMAP 权限的 refresh token；修改账号时留空保留原值。</p>
+        </details>
+        <p id="outlookError" class="config-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="outlookCancel" class="button button-light" type="button">返回</button>
+          <button id="outlookSave" class="button button-light" type="submit">保存已有 Token</button>
         </div>
       </form>
     </div>
@@ -151,7 +183,7 @@
           <div class="provider-row" role="row"><strong>QQ 邮箱</strong><code>imap.qq.com</code><code>993</code></div>
           <div class="provider-row" role="row"><strong>163 邮箱</strong><code>imap.163.com</code><code>993</code></div>
           <div class="provider-row" role="row"><strong>Gmail</strong><code>imap.gmail.com</code><code>993</code></div>
-          <div class="provider-row" role="row"><strong>Outlook</strong><code>outlook.office365.com</code><code>993</code></div>
+          <div class="provider-row" role="row"><strong>Outlook</strong><code>outlook.office365.com</code><code>993 / OAuth2</code></div>
         </div>
         <p class="help-subnote">以上参数仅适用于启用了 IMAP 的账号。企业邮箱、学校邮箱或自定义域名邮箱请以管理员/服务商给出的 IMAP 地址为准。</p>
       </div>
@@ -191,10 +223,12 @@
           <article class="provider-guide">
             <h4>Outlook / Microsoft 365</h4>
             <ol>
-              <li>先确认账号允许使用 IMAP；组织账号可能由 Microsoft 365 管理员统一控制。</li>
-              <li>如果账号已开启多重验证且安全页面提供<strong>应用密码</strong>，创建并复制一个新的应用密码。</li>
-              <li>回到本页“邮箱管理”：服务器填 <code>outlook.office365.com</code>，端口填 <code>993</code>，账号填完整邮箱地址，密码框优先填应用密码。</li>
-              <li>点击“保存并连接”。如果组织只允许 OAuth2 或已禁用基本身份验证，本服务当前无法登录，需要管理员开放可用的 IMAP 登录方式。</li>
+              <li>在 Outlook 网页设置的<strong>邮件 → 转发和 IMAP</strong>中允许设备和应用使用 IMAP。</li>
+              <li>在 Microsoft Entra 中注册应用，允许个人 Microsoft 账号，并打开<strong>允许公共客户端流</strong>。</li>
+              <li>复制应用程序（客户端）ID；无需创建 client secret。</li>
+              <li>点击<strong>添加 Outlook IMAP</strong>，填写邮箱和 Client ID，再点击<strong>开始 Microsoft 授权</strong>。</li>
+              <li>打开设备登录页并输入页面显示的代码。服务会申请 <code>IMAP.AccessAsUser.All</code> 与 <code>offline_access</code>。</li>
+              <li>授权完成后通过 OAuth2/XOAUTH2 只读连接 <code>outlook.office365.com:993</code>，令牌轮换会自动保存。</li>
             </ol>
           </article>
         </div>

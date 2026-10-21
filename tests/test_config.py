@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.config import AccountNotFound, Config
+from scripts.config import AccountNotFound, Config, parse_graph_import
 
 
 class ConfigTests(unittest.TestCase):
@@ -66,6 +66,35 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(Config.connection_values(account_id), ("imap.legacy", 993, "old@test", "pw"))
         rewritten = json.loads(self.path.read_text())
         self.assertEqual(rewritten["accounts"][0]["id"], account_id)
+
+    def test_graph_import_keeps_secrets_off_the_snapshot_and_rotates_tokens(self):
+        parsed, errors = parse_graph_import(
+            "\n".join([
+                "one@outlook.com----pass-word----11111111-2222-3333-4444-555555555555----refresh.token.value",
+                "two@outlook.com--secret--clientid02--refresh-token",
+                "not-an-email----x----clientid03----token",
+                "",
+            ])
+        )
+        self.assertEqual(errors, ["第 3 行邮箱格式无效。"])
+        self.assertEqual(parsed[0]["client_id"], "11111111-2222-3333-4444-555555555555")
+        self.assertEqual(parsed[0]["password"], "pass-word")
+        self.assertEqual(parsed[1]["refresh_token"], "refresh-token")
+        added = Config.import_graph_accounts(parsed[0]["account"] + "----" + parsed[0]["password"] + "----" + parsed[0]["client_id"] + "----" + parsed[0]["refresh_token"])
+        account = added["added"][0]
+        self.assertEqual(account["protocol"], "graph")
+        self.assertNotIn("refresh_token", account)
+        self.assertNotIn("password", account)
+        self.assertNotIn("refresh.token", json.dumps(Config.snapshot()))
+        stored = json.loads(self.path.read_text())["accounts"][0]
+        self.assertEqual(stored["password"], "pass-word")
+        self.assertEqual(stored["refresh_token"], "refresh.token.value")
+        Config.update_account(account["id"], "", 443, "one@outlook.com", "", "graph", stored["client_id"], "")
+        self.assertEqual(Config.mailbox(account["id"])["refresh_token"], "refresh.token.value")
+        Config.replace_refresh_token(account["id"], "refresh.token.value", "rotated-token")
+        self.assertEqual(Config.mailbox(account["id"])["refresh_token"], "rotated-token")
+        Config.replace_refresh_token(account["id"], "stale-token", "ignored-token")
+        self.assertEqual(Config.mailbox(account["id"])["refresh_token"], "rotated-token")
 
     def test_no_account_limit(self):
         for index in range(60):

@@ -12,7 +12,8 @@ usage() {
   --project NAME    Compose 项目名（默认: email-agent）
   --dir DIRECTORY   安装目录（仅配合 --remove-dir 使用，默认: /opt/email-agent）
   --remove-dir      同时删除安装目录中的源码和配置文件
-  --yes             确认删除容器、镜像、网络和 PostgreSQL 数据卷
+  --remove-volumes  同时删除项目数据卷（默认保留，重新部署后继续使用原数据）
+  --yes             确认删除容器、镜像和网络
   --help            显示此帮助
 EOF
 }
@@ -25,6 +26,7 @@ fail() {
 project=email-agent
 install_dir=/opt/email-agent
 remove_dir=0
+remove_volumes=0
 confirmed=0
 errors=0
 
@@ -56,6 +58,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --remove-dir)
       remove_dir=1
+      shift
+      ;;
+    --remove-volumes)
+      remove_volumes=1
       shift
       ;;
     --yes)
@@ -164,6 +170,19 @@ remove_volumes() {
   done
 }
 
+retain_volumes() {
+  found=0
+  for volume in $volumes; do
+    printf '保留数据卷: %s\n' "$volume"
+    found=1
+  done
+  if [ "$found" -eq 0 ]; then
+    printf '%s\n' '未发现项目数据卷。'
+  else
+    printf '%s\n' '数据卷已保留，重新部署后会继续使用原有数据。'
+  fi
+}
+
 remove_image_if_unused() {
   image=$1
   inventory=$(docker image ls --all --no-trunc --format '{{.ID}} {{.Repository}}:{{.Tag}}') || fail '无法查询镜像列表。'
@@ -195,7 +214,11 @@ EOF
 printf '开始卸载 Compose 项目: %s\n' "$project"
 remove_containers
 remove_networks
-remove_volumes
+if [ "$remove_volumes" -eq 1 ]; then
+  remove_volumes
+else
+  retain_volumes
+fi
 retained_images=
 processed_images=
 for image_target in $image_targets; do

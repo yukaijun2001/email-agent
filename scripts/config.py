@@ -31,6 +31,9 @@ except ValueError:
 POLL_INTERVAL_SECONDS = 30
 
 ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{8}")
+GRAPH_SERVER = "graph.microsoft.com"
+OUTLOOK_IMAP_SERVER = "outlook.office365.com"
+OUTLOOK_IMAP_PORT = 993
 _PUBLIC_FIELDS = ("id", "imap_server", "imap_port", "account")
 
 
@@ -42,13 +45,25 @@ def _clean_account(raw: dict) -> dict | None:
         port = int(raw.get("imap_port", 993))
     except (TypeError, ValueError):
         port = 993
+    protocol = str(raw.get("protocol") or "imap").strip().lower()
+    if protocol not in {"imap", "graph", "outlook_imap"}:
+        protocol = "imap"
     account = {
         "id": str(raw.get("id") or ""),
+        "protocol": protocol,
         "imap_server": str(raw.get("imap_server") or "").strip(),
         "imap_port": port,
         "account": str(raw.get("account") or "").strip(),
         "password": str(raw.get("password") or ""),
+        "client_id": str(raw.get("client_id") or "").strip(),
+        "refresh_token": str(raw.get("refresh_token") or "").strip(),
     }
+    if protocol == "graph":
+        account["imap_server"] = GRAPH_SERVER
+        account["imap_port"] = 443
+    elif protocol == "outlook_imap":
+        account["imap_server"] = OUTLOOK_IMAP_SERVER
+        account["imap_port"] = OUTLOOK_IMAP_PORT
     if not ACCOUNT_ID_PATTERN.fullmatch(account["id"]):
         account["id"] = secrets.token_hex(4)
     if not account["imap_server"] and not account["account"]:
@@ -58,9 +73,120 @@ def _clean_account(raw: dict) -> dict | None:
 
 def _public(account: dict) -> dict:
     value = {key: account[key] for key in _PUBLIC_FIELDS}
-    value["has_password"] = bool(account["password"])
-    value["configured"] = bool(account["imap_server"] and account["account"] and account["password"])
+    protocol = account.get("protocol") or "imap"
+    value["protocol"] = protocol
+    value["client_id"] = account.get("client_id") or ""
+    value["has_password"] = bool(account.get("password"))
+    value["has_refresh_token"] = bool(account.get("refresh_token"))
+    if protocol == "graph":
+        value["configured"] = bool(
+            account.get("account") and account.get("password")
+            and account.get("client_id") and account.get("refresh_token")
+        )
+    elif protocol == "outlook_imap":
+        value["configured"] = bool(
+            account.get("account") and account.get("client_id") and account.get("refresh_token")
+        )
+    else:
+        value["configured"] = bool(account["imap_server"] and account["account"] and account["password"])
     return value
+
+
+def parse_graph_import(text: str) -> tuple[list[dict], list[str]]:
+    """Parse ``email----password----client_id----refresh_token`` lines.
+
+    Separators of one to four dashes are accepted. Four dashes are preferred
+    because a client id is usually a UUID.
+    """
+    accounts: list[dict] = []
+    errors: list[str] = []
+    for index, line in enumerate(str(text or "").splitlines(), start=1):
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        parts = _split_graph_line(trimmed)
+        if not parts:
+            errors.append(f"第 {index} 行格式错误，请使用 邮箱----密码----client_id----refresh_token。")
+            continue
+        email, password, client_id, refresh_token = parts
+        if "@" not in email or email.startswith("@") or email.endswith("@") or any(ch.isspace() for ch in email):
+            errors.append(f"第 {index} 行邮箱格式无效。")
+            continue
+        accounts.append({
+            "account": email,
+            "password": password,
+            "client_id": client_id,
+            "refresh_token": refresh_token,
+        })
+    return accounts, errors
+
+
+def _split_graph_line(trimmed: str) -> list[str] | None:
+    for dash_count in range(4, 0, -1):
+        separator = "-" * dash_count
+        pieces = trimmed.split(separator)
+        if len(pieces) == 4:
+            cleaned = [part.strip() for part in pieces]
+            if all(cleaned):
+                return cleaned
+        if len(pieces) > 4:
+            cleaned: list[str] = []
+            remaining = trimmed
+            for _ in range(3):
+                found = remaining.find(separator)
+                if found == -1:
+                    break
+                cleaned.append(remaining[:found].strip())
+                remaining = remaining[found + len(separator):]
+            if len(cleaned) == 3 and remaining.strip():
+                cleaned.append(remaining.strip())
+                if all(cleaned):
+                    return cleaned
+    return None
+
+
+def _validate_graph(account, password, client_id, refresh_token) -> tuple[str, str, str, str]:
+    user = str(account or "").strip()
+    secret = "" if password is None else str(password)
+    app_id = str(client_id or "").strip()
+    token = "" if refresh_token is None else str(refresh_token).strip()
+    if "@" not in user or user.startswith("@") or user.endswith("@") or any(ch.isspace() for ch in user):
+        raise ValueError("请填写有效的 Outlook 邮箱。")
+    if len(user) > 320:
+        raise ValueError("邮箱账号过长。")
+    if not secret:
+        raise ValueError("请填写邮箱密码。")
+    if len(secret) > 1024:
+        raise ValueError("邮箱密码过长。")
+    if not app_id or len(app_id) > 128 or any(ch.isspace() for ch in app_id):
+        raise ValueError("请填写有效的 client_id。")
+    if len(app_id) < 8:
+        raise ValueError("请填写有效的 client_id。")
+    if not token:
+        raise ValueError("请填写 refresh_token。")
+    if len(token) > 8192 or any(ch.isspace() for ch in token):
+        raise ValueError("refresh_token 格式无效。")
+    return user, secret, app_id, token
+
+
+def _validate_outlook_imap(account, client_id, refresh_token) -> tuple[str, str, str]:
+    """Validate the OAuth credentials used by Outlook IMAP/XOAUTH2."""
+    user = str(account or "").strip()
+    app_id = str(client_id or "").strip()
+    token = "" if refresh_token is None else str(refresh_token).strip()
+    if "@" not in user or user.startswith("@") or user.endswith("@") or any(ch.isspace() for ch in user):
+        raise ValueError("请填写有效的 Outlook 邮箱。")
+    if len(user) > 320:
+        raise ValueError("邮箱账号过长。")
+    if not app_id or len(app_id) > 128 or any(ch.isspace() for ch in app_id):
+        raise ValueError("请填写有效的 client_id。")
+    if len(app_id) < 8:
+        raise ValueError("请填写有效的 client_id。")
+    if not token:
+        raise ValueError("请先完成 Microsoft OAuth2 授权，或填写 refresh_token。")
+    if len(token) > 8192 or any(ch.isspace() for ch in token):
+        raise ValueError("refresh_token 格式无效。")
+    return user, app_id, token
 
 
 def _validate(imap_server, imap_port, account) -> tuple[str, int, str]:
@@ -108,12 +234,22 @@ class Config:
 
     @staticmethod
     def _account_from_row(row) -> dict:
+        protocol = row[1] or "imap"
+        server = row[2]
+        port = int(row[3])
+        if protocol == "graph":
+            server, port = GRAPH_SERVER, 443
+        elif protocol == "outlook_imap":
+            server, port = OUTLOOK_IMAP_SERVER, OUTLOOK_IMAP_PORT
         return {
             "id": row[0],
-            "imap_server": row[1],
-            "imap_port": int(row[2]),
-            "account": row[3],
-            "password": row[4],
+            "protocol": protocol,
+            "imap_server": server,
+            "imap_port": port,
+            "account": row[4],
+            "password": row[5],
+            "client_id": row[6] or "",
+            "refresh_token": row[7] or "",
         }
 
     @classmethod
@@ -156,6 +292,15 @@ class Config:
                     """
                 )
                 cursor.execute(
+                    "ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS protocol VARCHAR(16) NOT NULL DEFAULT 'imap'"
+                )
+                cursor.execute(
+                    "ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS client_id VARCHAR(128) NOT NULL DEFAULT ''"
+                )
+                cursor.execute(
+                    "ALTER TABLE mail_accounts ADD COLUMN IF NOT EXISTS refresh_token TEXT NOT NULL DEFAULT ''"
+                )
+                cursor.execute(
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS mail_accounts_server_account_idx
                     ON mail_accounts (LOWER(imap_server), LOWER(account))
@@ -169,16 +314,19 @@ class Config:
                         cursor.execute(
                             """
                             INSERT INTO mail_accounts
-                                (id, imap_server, imap_port, account, password)
-                            VALUES (%s, %s, %s, %s, %s)
+                                (id, protocol, imap_server, imap_port, account, password, client_id, refresh_token)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT DO NOTHING
                             """,
                             (
                                 account["id"],
+                                account.get("protocol") or "imap",
                                 account["imap_server"],
                                 account["imap_port"],
                                 account["account"],
                                 account["password"],
+                                account.get("client_id") or "",
+                                account.get("refresh_token") or "",
                             ),
                         )
 
@@ -190,7 +338,7 @@ class Config:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT id, imap_server, imap_port, account, password
+                        SELECT id, protocol, imap_server, imap_port, account, password, client_id, refresh_token
                         FROM mail_accounts
                         ORDER BY created_at, id
                         """
@@ -256,7 +404,7 @@ class Config:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT id, imap_server, imap_port, account, password
+                        SELECT id, protocol, imap_server, imap_port, account, password, client_id, refresh_token
                         FROM mail_accounts WHERE id = %s
                         """,
                         (account_id,),
@@ -330,6 +478,20 @@ class Config:
             account = cls._find_locked(account_id)
             return account["imap_server"], account["imap_port"], account["account"], account["password"]
 
+    @classmethod
+    def mailbox(cls, account_id: str) -> dict:
+        """Return one stored account, including secrets, for a reader thread."""
+        with cls._lock:
+            return dict(cls._find_locked(account_id))
+
+    @classmethod
+    def is_graph(cls, account_id: str) -> bool:
+        return cls.mailbox(account_id).get("protocol") == "graph"
+
+    @classmethod
+    def is_outlook_imap(cls, account_id: str) -> bool:
+        return cls.mailbox(account_id).get("protocol") == "outlook_imap"
+
     # ------------------------------------------------------------------ writes
     @classmethod
     def add_account(cls, imap_server, imap_port, account, password) -> dict:
@@ -348,10 +510,13 @@ class Config:
                 new_id = secrets.token_hex(4)
             entry = {
                 "id": new_id,
+                "protocol": "imap",
                 "imap_server": server,
                 "imap_port": port,
                 "account": user,
                 "password": secret,
+                "client_id": "",
+                "refresh_token": "",
             }
             next_accounts = [*accounts, entry]
             cls._write_locked(next_accounts)
@@ -359,28 +524,162 @@ class Config:
             return _public(entry)
 
     @classmethod
-    def update_account(cls, account_id, imap_server, imap_port, account, password) -> dict:
-        """Update an account, preserving the stored password when ``password`` is blank."""
-        server, port, user = _validate(imap_server, imap_port, account)
+    def update_account(cls, account_id, imap_server, imap_port, account, password, protocol=None, client_id=None, refresh_token=None) -> dict:
+        """Update an account, preserving stored secrets when the new values are blank."""
         with cls._lock:
+            current = cls._find_locked(account_id)
+            kind = str(protocol or current.get("protocol") or "imap").strip().lower()
+            if kind == "graph":
+                secret = current.get("password") if password in (None, "") else str(password)
+                token = current.get("refresh_token") if refresh_token in (None, "") else refresh_token
+                app_id = current.get("client_id") if client_id is None else client_id
+                return cls._write_graph_locked(account_id, account, secret, app_id, token, current)
+            if kind == "outlook_imap":
+                token = current.get("refresh_token") if refresh_token in (None, "") else refresh_token
+                app_id = current.get("client_id") if client_id is None else client_id
+                return cls._write_outlook_imap_locked(account_id, account, app_id, token, current)
+            server, port, user = _validate(imap_server, imap_port, account)
             if cls._uses_postgres():
                 return cls._update_postgres_locked(account_id, server, port, user, password)
-            current = cls._find_locked(account_id)
             cls._ensure_unique_locked(server, user, account_id)
             secret = current["password"] if password in (None, "") else str(password)
             if not secret:
                 raise ValueError("请填写授权码或应用密码。")
             entry = {
                 "id": account_id,
+                "protocol": "imap",
                 "imap_server": server,
                 "imap_port": port,
                 "account": user,
                 "password": secret,
+                "client_id": "",
+                "refresh_token": "",
             }
             next_accounts = [entry if a["id"] == account_id else a for a in cls._load_locked()]
             cls._write_locked(next_accounts)
             cls._accounts = next_accounts
             return _public(entry)
+
+    @classmethod
+    def add_graph_account(cls, account, password, client_id, refresh_token) -> dict:
+        user, secret, app_id, token = _validate_graph(account, password, client_id, refresh_token)
+        with cls._lock:
+            return cls._write_graph_locked(None, user, secret, app_id, token, None)
+
+    @classmethod
+    def add_outlook_imap_account(cls, account, client_id, refresh_token) -> dict:
+        user, app_id, token = _validate_outlook_imap(account, client_id, refresh_token)
+        with cls._lock:
+            return cls._write_outlook_imap_locked(None, user, app_id, token, None)
+
+    @classmethod
+    def import_graph_accounts(cls, text: str) -> dict:
+        """Import Outlook lines. One bad line does not roll back lines already saved."""
+        parsed, errors = parse_graph_import(text)
+        if not parsed and not errors:
+            raise ValueError("请粘贴至少一行 Outlook 账号。")
+        added: list[dict] = []
+        with cls._lock:
+            for item in parsed:
+                try:
+                    added.append(cls._write_graph_locked(
+                        None, item["account"], item["password"], item["client_id"], item["refresh_token"], None,
+                    ))
+                except ValueError as exc:
+                    errors.append(f"{item['account']}：{exc}")
+        return {"added": added, "errors": errors}
+
+    @classmethod
+    def replace_refresh_token(cls, account_id: str, previous: str, new_token: str) -> None:
+        """Persist a rotated OAuth refresh token when it still matches ``previous``."""
+        token = str(new_token or "").strip()
+        if not token or token == previous or len(token) > 8192 or any(ch.isspace() for ch in token):
+            return
+        with cls._lock:
+            current = cls._find_locked(account_id)
+            if current.get("protocol") not in {"graph", "outlook_imap"} \
+                    or current.get("refresh_token") != previous:
+                return
+            current["refresh_token"] = token
+            if cls._uses_postgres():
+                with cls._pg_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE mail_accounts
+                            SET refresh_token = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s AND refresh_token = %s
+                            """,
+                            (token, account_id, previous),
+                        )
+                return
+            next_accounts = [current if a["id"] == account_id else a for a in cls._load_locked()]
+            cls._write_locked(next_accounts)
+            cls._accounts = next_accounts
+
+    @classmethod
+    def _write_graph_locked(cls, account_id: str | None, account, password, client_id, refresh_token, current: dict | None) -> dict:
+        user, secret, app_id, token = _validate_graph(account, password, client_id, refresh_token)
+        cls._ensure_unique_locked(GRAPH_SERVER, user, account_id)
+        if account_id is None:
+            accounts = [] if cls._uses_postgres() else cls._load_locked()
+            existing = {item["id"] for item in accounts}
+            new_id = secrets.token_hex(4)
+            while new_id in existing:
+                new_id = secrets.token_hex(4)
+            account_id = new_id
+        entry = {
+            "id": account_id,
+            "protocol": "graph",
+            "imap_server": GRAPH_SERVER,
+            "imap_port": 443,
+            "account": user,
+            "password": secret,
+            "client_id": app_id,
+            "refresh_token": token,
+        }
+        if cls._uses_postgres():
+            return cls._upsert_graph_postgres_locked(entry, current is not None)
+        if current is None:
+            next_accounts = [*cls._load_locked(), entry]
+        else:
+            next_accounts = [entry if item["id"] == account_id else item for item in cls._load_locked()]
+        cls._write_locked(next_accounts)
+        cls._accounts = next_accounts
+        return _public(entry)
+
+    @classmethod
+    def _write_outlook_imap_locked(
+        cls, account_id: str | None, account, client_id, refresh_token, current: dict | None
+    ) -> dict:
+        user, app_id, token = _validate_outlook_imap(account, client_id, refresh_token)
+        cls._ensure_unique_locked(OUTLOOK_IMAP_SERVER, user, account_id)
+        if account_id is None:
+            accounts = [] if cls._uses_postgres() else cls._load_locked()
+            existing = {item["id"] for item in accounts}
+            new_id = secrets.token_hex(4)
+            while new_id in existing:
+                new_id = secrets.token_hex(4)
+            account_id = new_id
+        entry = {
+            "id": account_id,
+            "protocol": "outlook_imap",
+            "imap_server": OUTLOOK_IMAP_SERVER,
+            "imap_port": OUTLOOK_IMAP_PORT,
+            "account": user,
+            "password": "",
+            "client_id": app_id,
+            "refresh_token": token,
+        }
+        if cls._uses_postgres():
+            return cls._upsert_outlook_imap_postgres_locked(entry, current is not None)
+        if current is None:
+            next_accounts = [*cls._load_locked(), entry]
+        else:
+            next_accounts = [entry if item["id"] == account_id else item for item in cls._load_locked()]
+        cls._write_locked(next_accounts)
+        cls._accounts = next_accounts
+        return _public(entry)
 
     @classmethod
     def remove_account(cls, account_id: str) -> None:
@@ -405,20 +704,24 @@ class Config:
         cls._ensure_unique_locked(server, user, None)
         entry = {
             "id": secrets.token_hex(4),
+            "protocol": "imap",
             "imap_server": server,
             "imap_port": port,
             "account": user,
             "password": secret,
+            "client_id": "",
+            "refresh_token": "",
         }
         try:
             with cls._pg_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        INSERT INTO mail_accounts (id, imap_server, imap_port, account, password)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO mail_accounts
+                            (id, protocol, imap_server, imap_port, account, password, client_id, refresh_token)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """,
-                        (entry["id"], server, port, user, secret),
+                        (entry["id"], "imap", server, port, user, secret, "", ""),
                     )
         except Exception as exc:
             if exc.__class__.__name__ == "UniqueViolation":
@@ -436,10 +739,13 @@ class Config:
             raise ValueError("请填写授权码或应用密码。")
         entry = {
             "id": account_id,
+            "protocol": "imap",
             "imap_server": server,
             "imap_port": port,
             "account": user,
             "password": secret,
+            "client_id": "",
+            "refresh_token": "",
         }
         try:
             with cls._pg_connection() as conn:
@@ -447,14 +753,99 @@ class Config:
                     cursor.execute(
                         """
                         UPDATE mail_accounts
-                        SET imap_server = %s, imap_port = %s, account = %s,
-                            password = %s, updated_at = CURRENT_TIMESTAMP
+                        SET protocol = 'imap', imap_server = %s, imap_port = %s, account = %s,
+                            password = %s, client_id = '', refresh_token = '',
+                            updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s
                         """,
                         (server, port, user, secret, account_id),
                     )
                     if cursor.rowcount != 1:
                         raise AccountNotFound(account_id)
+        except Exception as exc:
+            if exc.__class__.__name__ == "UniqueViolation":
+                raise ValueError("该邮箱已添加，请勿重复配置。") from exc
+            raise
+        return _public(entry)
+
+    @classmethod
+    def _upsert_graph_postgres_locked(cls, entry: dict, updating: bool) -> dict:
+        cls.initialize()
+        try:
+            with cls._pg_connection() as conn:
+                with conn.cursor() as cursor:
+                    if updating:
+                        cursor.execute(
+                            """
+                            UPDATE mail_accounts
+                            SET protocol = 'graph', imap_server = %s, imap_port = %s, account = %s,
+                                password = %s, client_id = %s, refresh_token = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """,
+                            (
+                                entry["imap_server"], entry["imap_port"], entry["account"], entry["password"],
+                                entry["client_id"], entry["refresh_token"], entry["id"],
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise AccountNotFound(entry["id"])
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO mail_accounts
+                                (id, protocol, imap_server, imap_port, account, password, client_id, refresh_token)
+                            VALUES (%s, 'graph', %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                entry["id"], entry["imap_server"], entry["imap_port"], entry["account"],
+                                entry["password"], entry["client_id"], entry["refresh_token"],
+                            ),
+                        )
+        except AccountNotFound:
+            raise
+        except Exception as exc:
+            if exc.__class__.__name__ == "UniqueViolation":
+                raise ValueError("该邮箱已添加，请勿重复配置。") from exc
+            raise
+        return _public(entry)
+
+    @classmethod
+    def _upsert_outlook_imap_postgres_locked(cls, entry: dict, updating: bool) -> dict:
+        cls.initialize()
+        try:
+            with cls._pg_connection() as conn:
+                with conn.cursor() as cursor:
+                    if updating:
+                        cursor.execute(
+                            """
+                            UPDATE mail_accounts
+                            SET protocol = 'outlook_imap', imap_server = %s, imap_port = %s,
+                                account = %s, password = '', client_id = %s, refresh_token = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """,
+                            (
+                                entry["imap_server"], entry["imap_port"], entry["account"],
+                                entry["client_id"], entry["refresh_token"], entry["id"],
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise AccountNotFound(entry["id"])
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO mail_accounts
+                                (id, protocol, imap_server, imap_port, account, password, client_id, refresh_token)
+                            VALUES (%s, 'outlook_imap', %s, %s, %s, '', %s, %s)
+                            """,
+                            (
+                                entry["id"], entry["imap_server"], entry["imap_port"], entry["account"],
+                                entry["client_id"], entry["refresh_token"],
+                            ),
+                        )
+        except AccountNotFound:
+            raise
         except Exception as exc:
             if exc.__class__.__name__ == "UniqueViolation":
                 raise ValueError("该邮箱已添加，请勿重复配置。") from exc
