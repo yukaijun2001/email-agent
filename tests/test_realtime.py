@@ -241,7 +241,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(result["added_lines"], [1])
         self.assertEqual(result["errors"][0]["line"], 2)
-        self.assertEqual(result["added"][0]["protocol"], "outlook_imap")
+        self.assertEqual(result["added"][0]["protocol"], "graph")
         self.assertNotIn("secret-password", json.dumps(result))
         self.assertNotIn("secret-token", json.dumps(result))
         status, duplicate = self._request("POST", "/api/outlook/import", payload)

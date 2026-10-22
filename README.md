@@ -1,6 +1,6 @@
 # 只读收件箱
 
-一个本地运行的邮箱收件箱查看器。普通邮箱通过 IMAP SSL 读取 `INBOX`；Outlook 使用 OAuth2 + SASL XOAUTH2 连接 `outlook.office365.com:993`。新邮件经 WebSocket 推送到浏览器。不会发送、回复、删除、移动邮件，也不会修改已读状态。
+一个本地运行的邮箱收件箱查看器。普通邮箱通过 IMAP SSL 读取 `INBOX`；Outlook 仅通过 Microsoft Graph OAuth2 读取收件箱。新邮件经 WebSocket 推送到浏览器。不会发送、回复、删除、移动邮件，也不会修改已读状态。
 
 ## 启动
 
@@ -19,17 +19,17 @@ user2@outlook.com--pass--clientid02--token
 
 每行一个邮箱，格式为 `邮箱----密码----client_id----refresh_token`。支持 1～4 个短横线分隔，推荐 `----`，避免与字段内的短横线混淆。单短横线分隔时支持识别 UUID 格式的 Client ID。粘贴后只显示识别预览，点击“添加邮箱”才保存；格式错误或重复的行会提示原因，已成功添加的行会从输入中移除，剩余行可修改后重试。
 
-新增账号使用 Outlook IMAP OAuth2；四段中的密码只参与格式识别，不会用于登录或保存。Refresh Token 必须包含 `https://outlook.office.com/IMAP.AccessAsUser.All` 与 `offline_access` 权限。
+新增账号使用 Outlook Graph OAuth2；四段中的密码只参与格式识别，不会用于登录或保存。Refresh Token 必须包含 `https://graph.microsoft.com/Mail.Read` 与 `offline_access` 权限。
 
 ### 已有 Outlook 账号重新授权
 
-1. 在 Outlook 网页设置的“邮件 → 转发和 IMAP”中允许设备和应用使用 IMAP。
-2. 在 Microsoft Entra 注册应用；受支持账号类型需包含“个人 Microsoft 账号”。
+1. 在 Microsoft Entra 注册应用；受支持账号类型需包含“个人 Microsoft 账号”。
+2. 为应用添加 Microsoft Graph 委托权限 `Mail.Read`。
 3. 在“身份验证”中启用“允许公共客户端流”。设备代码流不需要 client secret 或回调地址。
 4. 在邮箱管理中编辑已有 Outlook 账号，确认邮箱和应用程序（客户端）ID。
-5. 点击“开始 Microsoft 授权”，打开显示的设备登录页并输入代码。应用请求 `offline_access` 与 `https://outlook.office.com/IMAP.AccessAsUser.All`。
+5. 点击“开始 Microsoft 授权”，打开显示的设备登录页并输入代码。应用请求 `offline_access` 与 `https://graph.microsoft.com/Mail.Read`。
 
-Outlook 的普通密码和 16 位应用密码不能用于这条链路；服务器明确返回 `LOGINDISABLED` 时必须使用 OAuth2。设备代码和 access token 只保存在进程内存，持久化存储中只保存 refresh token。
+设备代码和 access token 只保存在进程内存，持久化存储中只保存 refresh token。旧版 Outlook IMAP OAuth2 配置会按 Graph 账号读取，无需重新添加；原令牌需要具备 Graph Mail.Read 权限。
 
 管理服务：
 
@@ -179,7 +179,7 @@ curl -fsSL https://raw.githubusercontent.com/yukaijun2001/email-agent/main/unins
 | GET | `/api/accounts` | 邮箱列表（不含授权码） |
 | POST | `/api/accounts` | 添加邮箱 |
 | POST | `/api/outlook/preview` | 四段文本识别预览，JSON 参数 `text`；不保存、不返回密码或 Token |
-| POST | `/api/outlook/import` | 手动确认后批量添加 Outlook IMAP 邮箱，返回 `added`、原始 `added_lines` 和逐行 `errors` |
+| POST | `/api/outlook/import` | 手动确认后批量添加 Outlook Graph 邮箱，返回 `added`、原始 `added_lines` 和逐行 `errors` |
 | PUT | `/api/accounts/{id}` | 修改邮箱，`password` 留空则保留原授权码 |
 | DELETE | `/api/accounts/{id}` | 删除邮箱 |
 | GET | `/api/emails?account=all\|{id}&limit=50` | 合并或单个邮箱的邮件列表，附带各邮箱的 `errors` |

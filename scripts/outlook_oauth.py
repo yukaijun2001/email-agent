@@ -1,9 +1,6 @@
-"""Outlook IMAP authentication through Microsoft OAuth2 and SASL XOAUTH2.
+"""Microsoft device-code authorization used by Outlook Graph accounts.
 
-The module owns two short-lived caches:
-
-* access tokens refreshed from the account's persisted refresh token;
-* device-code authorization attempts started by the web UI.
+Device-code authorization attempts stay in memory until completion or expiry.
 
 Only refresh tokens are persisted. Access tokens and device codes stay in
 memory and are never returned by the account APIs.
@@ -23,15 +20,17 @@ from typing import Any
 try:
     from . import config
     from .imap_reader import MailboxError
+    from .microsoft_oauth import oauth_error_message
 except ImportError:  # Running scripts/main.py directly.
     import config
     from imap_reader import MailboxError
+    from microsoft_oauth import oauth_error_message
 
 
 AUTHORITY = "https://login.microsoftonline.com/common/oauth2/v2.0"
 DEVICE_CODE_URL = f"{AUTHORITY}/devicecode"
 TOKEN_URL = f"{AUTHORITY}/token"
-IMAP_SCOPE = "offline_access https://outlook.office.com/IMAP.AccessAsUser.All"
+GRAPH_SCOPE = "offline_access https://graph.microsoft.com/Mail.Read"
 REQUEST_TIMEOUT_SECONDS = 20
 MIN_POLL_INTERVAL_SECONDS = 5
 
@@ -47,30 +46,7 @@ def _json_object(payload: bytes) -> dict[str, Any]:
 
 
 def _oauth_error(payload: dict[str, Any], status: int = 0) -> str:
-    code = str(payload.get("error") or "")
-    description = str(payload.get("error_description") or "")
-    blob = f"{code} {description}".lower()
-    if code == "authorization_pending":
-        return "pending"
-    if code == "slow_down":
-        return "slow_down"
-    if code in {"authorization_declined", "access_denied"}:
-        return "Microsoft 授权已被拒绝，请重新开始授权。"
-    if code in {"expired_token", "code_expired"}:
-        return "Microsoft 设备授权已过期，请重新开始授权。"
-    if code == "invalid_grant":
-        return "Outlook refresh_token 已失效，请重新完成 Microsoft 授权。"
-    if code in {"invalid_client", "unauthorized_client"} or "aadsts700016" in blob:
-        return "Client ID 无效，或应用未启用公共客户端/设备代码登录。"
-    if code == "invalid_scope" or "aadsts70011" in blob:
-        return "Microsoft 应用未允许 Outlook IMAP OAuth2 权限。"
-    if "aadsts50020" in blob or "personal microsoft accounts" in blob:
-        return "该应用未允许个人 Microsoft 账号，请修改应用的受支持账号类型。"
-    if description:
-        return description[:220]
-    if status:
-        return f"Microsoft OAuth2 请求失败（HTTP {status}）。"
-    return "Microsoft OAuth2 请求失败。"
+    return oauth_error_message(payload, status)
 
 
 def _request_form(url: str, form: dict[str, str]) -> tuple[int, dict[str, Any]]:
@@ -95,88 +71,24 @@ def _request_form(url: str, form: dict[str, str]) -> tuple[int, dict[str, Any]]:
 
 
 class OutlookOAuth:
-    """Refresh Outlook access tokens and manage device-code authorization."""
+    """Manage device-code authorization for Graph Mail.Read."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._account_locks: dict[str, threading.Lock] = {}
-        # account_id -> (refresh_token, access_token, usable_until_epoch)
-        self._tokens: dict[str, tuple[str, str, float]] = {}
         # opaque flow id -> server-only device-code state
         self._flows: dict[str, dict[str, Any]] = {}
 
     def close(self) -> None:
         with self._lock:
-            self._tokens.clear()
             self._flows.clear()
 
     def prune(self, keep_ids: set[str]) -> None:
         with self._lock:
-            for account_id in list(self._tokens):
-                if account_id not in keep_ids:
-                    self._tokens.pop(account_id, None)
-                    self._account_locks.pop(account_id, None)
             now = time.time()
             for flow_id in list(self._flows):
-                if self._flows[flow_id]["expires_at"] <= now:
+                flow = self._flows[flow_id]
+                if flow["expires_at"] <= now or (flow["account_id"] and flow["account_id"] not in keep_ids):
                     self._flows.pop(flow_id, None)
-
-    def _account_lock(self, account_id: str) -> threading.Lock:
-        with self._lock:
-            lock = self._account_locks.get(account_id)
-            if lock is None:
-                lock = threading.Lock()
-                self._account_locks[account_id] = lock
-            return lock
-
-    @staticmethod
-    def _credentials(account_id: str) -> dict:
-        try:
-            account = config.Config.mailbox(account_id)
-        except config.AccountNotFound as exc:
-            raise MailboxError("邮箱不存在或已被删除。") from exc
-        if account.get("protocol") != "outlook_imap":
-            raise MailboxError("这个邮箱不是 Outlook IMAP OAuth2 账号。")
-        if not account.get("account") or not account.get("client_id") or not account.get("refresh_token"):
-            raise MailboxError("请先完成 Outlook IMAP OAuth2 授权。")
-        return account
-
-    def access_token(self, account_id: str, *, force_refresh: bool = False) -> str:
-        """Return a valid Outlook IMAP access token and persist token rotation."""
-        with self._account_lock(account_id):
-            account = self._credentials(account_id)
-            refresh_token = account["refresh_token"]
-            now = time.time()
-            cached = self._tokens.get(account_id)
-            if not force_refresh and cached and cached[0] == refresh_token and cached[2] > now:
-                return cached[1]
-            token, new_refresh, expires_in = self._refresh(account["client_id"], refresh_token)
-            if new_refresh and new_refresh != refresh_token:
-                config.Config.replace_refresh_token(account_id, refresh_token, new_refresh)
-                refresh_token = new_refresh
-            usable_until = now + max(30, expires_in - 120)
-            self._tokens[account_id] = (refresh_token, token, usable_until)
-            return token
-
-    @staticmethod
-    def _refresh(client_id: str, refresh_token: str) -> tuple[str, str, int]:
-        status, payload = _request_form(TOKEN_URL, {
-            "client_id": client_id,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "scope": IMAP_SCOPE,
-        })
-        if status != 200 or not payload.get("access_token"):
-            raise MailboxError(_oauth_error(payload, status))
-        try:
-            expires_in = int(payload.get("expires_in") or 3600)
-        except (TypeError, ValueError):
-            expires_in = 3600
-        return (
-            str(payload["access_token"]),
-            str(payload.get("refresh_token") or ""),
-            expires_in,
-        )
 
     def start_device_flow(
         self, account: str, client_id: str, account_id: str | None = None
@@ -193,9 +105,9 @@ class OutlookOAuth:
                 existing = config.Config.mailbox(account_id)
             except config.AccountNotFound as exc:
                 raise ValueError("邮箱不存在或已被删除。") from exc
-            if existing.get("protocol") != "outlook_imap":
-                raise ValueError("只能为 Outlook IMAP 账号重新授权。")
-        status, payload = _request_form(DEVICE_CODE_URL, {"client_id": app_id, "scope": IMAP_SCOPE})
+            if existing.get("protocol") != "graph":
+                raise ValueError("只能为 Outlook Graph 账号重新授权。")
+        status, payload = _request_form(DEVICE_CODE_URL, {"client_id": app_id, "scope": GRAPH_SCOPE})
         if status != 200 or not all(payload.get(key) for key in ("device_code", "user_code")):
             raise MailboxError(_oauth_error(payload, status))
         try:
@@ -270,32 +182,19 @@ class OutlookOAuth:
         if account_id:
             saved = config.Config.update_account(
                 account_id,
-                config.OUTLOOK_IMAP_SERVER,
-                config.OUTLOOK_IMAP_PORT,
+                config.GRAPH_SERVER,
+                443,
                 flow["account"],
                 None,
-                "outlook_imap",
+                "graph",
                 flow["client_id"],
                 refresh_token,
             )
         else:
-            saved = config.Config.add_outlook_imap_account(
+            saved = config.Config.add_outlook_account(
                 flow["account"], flow["client_id"], refresh_token,
             )
-        try:
-            expires_in = int(payload.get("expires_in") or 3600)
-        except (TypeError, ValueError):
-            expires_in = 3600
         with self._lock:
             self._flows.pop(key, None)
-            self._tokens[saved["id"]] = (
-                refresh_token,
-                str(payload["access_token"]),
-                time.time() + max(30, expires_in - 120),
-            )
         return {"status": "complete", "account": saved}
 
-
-def xoauth2_bytes(username: str, access_token: str) -> bytes:
-    """Raw SASL payload; ``imaplib.authenticate`` performs base64 encoding."""
-    return f"user={username}\x01auth=Bearer {access_token}\x01\x01".encode("utf-8")

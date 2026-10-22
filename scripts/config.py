@@ -32,8 +32,6 @@ POLL_INTERVAL_SECONDS = 30
 
 ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{8}")
 GRAPH_SERVER = "graph.microsoft.com"
-OUTLOOK_IMAP_SERVER = "outlook.office365.com"
-OUTLOOK_IMAP_PORT = 993
 _PUBLIC_FIELDS = ("id", "imap_server", "imap_port", "account")
 
 
@@ -46,7 +44,9 @@ def _clean_account(raw: dict) -> dict | None:
     except (TypeError, ValueError):
         port = 993
     protocol = str(raw.get("protocol") or "imap").strip().lower()
-    if protocol not in {"imap", "graph", "outlook_imap"}:
+    if protocol == "outlook_imap":
+        protocol = "graph"
+    if protocol not in {"imap", "graph"}:
         protocol = "imap"
     account = {
         "id": str(raw.get("id") or ""),
@@ -61,9 +61,6 @@ def _clean_account(raw: dict) -> dict | None:
     if protocol == "graph":
         account["imap_server"] = GRAPH_SERVER
         account["imap_port"] = 443
-    elif protocol == "outlook_imap":
-        account["imap_server"] = OUTLOOK_IMAP_SERVER
-        account["imap_port"] = OUTLOOK_IMAP_PORT
     if not ACCOUNT_ID_PATTERN.fullmatch(account["id"]):
         account["id"] = secrets.token_hex(4)
     if not account["imap_server"] and not account["account"]:
@@ -79,11 +76,6 @@ def _public(account: dict) -> dict:
     value["has_password"] = bool(account.get("password"))
     value["has_refresh_token"] = bool(account.get("refresh_token"))
     if protocol == "graph":
-        value["configured"] = bool(
-            account.get("account") and account.get("password")
-            and account.get("client_id") and account.get("refresh_token")
-        )
-    elif protocol == "outlook_imap":
         value["configured"] = bool(
             account.get("account") and account.get("client_id") and account.get("refresh_token")
         )
@@ -149,7 +141,7 @@ def _parse_outlook_import(text: str) -> tuple[list[dict], list[dict]]:
             continue
         item = parsed[0]
         try:
-            _validate_graph(item["account"], item["password"], item["client_id"], item["refresh_token"])
+            _validate_outlook_oauth(item["account"], item["client_id"], item["refresh_token"])
         except ValueError as exc:
             errors.append({"line": index, "message": str(exc)})
         else:
@@ -166,8 +158,6 @@ def _validate_graph(account, password, client_id, refresh_token) -> tuple[str, s
         raise ValueError("请填写有效的 Outlook 邮箱。")
     if len(user) > 320:
         raise ValueError("邮箱账号过长。")
-    if not secret:
-        raise ValueError("请填写邮箱密码。")
     if len(secret) > 1024:
         raise ValueError("邮箱密码过长。")
     if not app_id or len(app_id) > 128 or any(ch.isspace() for ch in app_id):
@@ -181,8 +171,8 @@ def _validate_graph(account, password, client_id, refresh_token) -> tuple[str, s
     return user, secret, app_id, token
 
 
-def _validate_outlook_imap(account, client_id, refresh_token) -> tuple[str, str, str]:
-    """Validate the OAuth credentials used by Outlook IMAP/XOAUTH2."""
+def _validate_outlook_oauth(account, client_id, refresh_token) -> tuple[str, str, str]:
+    """Validate Outlook Graph OAuth credentials."""
     user = str(account or "").strip()
     app_id = str(client_id or "").strip()
     token = "" if refresh_token is None else str(refresh_token).strip()
@@ -246,13 +236,11 @@ class Config:
 
     @staticmethod
     def _account_from_row(row) -> dict:
-        protocol = row[1] or "imap"
+        protocol = "graph" if row[1] == "outlook_imap" else row[1] or "imap"
         server = row[2]
         port = int(row[3])
         if protocol == "graph":
             server, port = GRAPH_SERVER, 443
-        elif protocol == "outlook_imap":
-            server, port = OUTLOOK_IMAP_SERVER, OUTLOOK_IMAP_PORT
         return {
             "id": row[0],
             "protocol": protocol,
@@ -381,6 +369,8 @@ class Config:
                 raw_accounts = []
             seen: set[str] = set()
             for raw in raw_accounts:
+                if isinstance(raw, dict) and raw.get("protocol") == "outlook_imap":
+                    migrated = True
                 cleaned = _clean_account(raw)
                 if not cleaned:
                     continue
@@ -439,7 +429,8 @@ class Config:
                         cursor.execute(
                             """
                             SELECT 1 FROM mail_accounts
-                            WHERE LOWER(imap_server) = LOWER(%s)
+                            WHERE LOWER(CASE WHEN protocol = 'outlook_imap'
+                                       THEN 'graph.microsoft.com' ELSE imap_server END) = LOWER(%s)
                               AND LOWER(account) = LOWER(%s)
                               AND id <> %s
                             LIMIT 1
@@ -450,7 +441,8 @@ class Config:
                         cursor.execute(
                             """
                             SELECT 1 FROM mail_accounts
-                            WHERE LOWER(imap_server) = LOWER(%s)
+                            WHERE LOWER(CASE WHEN protocol = 'outlook_imap'
+                                       THEN 'graph.microsoft.com' ELSE imap_server END) = LOWER(%s)
                               AND LOWER(account) = LOWER(%s)
                             LIMIT 1
                             """,
@@ -500,10 +492,6 @@ class Config:
     def is_graph(cls, account_id: str) -> bool:
         return cls.mailbox(account_id).get("protocol") == "graph"
 
-    @classmethod
-    def is_outlook_imap(cls, account_id: str) -> bool:
-        return cls.mailbox(account_id).get("protocol") == "outlook_imap"
-
     # ------------------------------------------------------------------ writes
     @classmethod
     def add_account(cls, imap_server, imap_port, account, password) -> dict:
@@ -541,15 +529,13 @@ class Config:
         with cls._lock:
             current = cls._find_locked(account_id)
             kind = str(protocol or current.get("protocol") or "imap").strip().lower()
+            if kind == "outlook_imap":
+                kind = "graph"
             if kind == "graph":
                 secret = current.get("password") if password in (None, "") else str(password)
                 token = current.get("refresh_token") if refresh_token in (None, "") else refresh_token
                 app_id = current.get("client_id") if client_id is None else client_id
                 return cls._write_graph_locked(account_id, account, secret, app_id, token, current)
-            if kind == "outlook_imap":
-                token = current.get("refresh_token") if refresh_token in (None, "") else refresh_token
-                app_id = current.get("client_id") if client_id is None else client_id
-                return cls._write_outlook_imap_locked(account_id, account, app_id, token, current)
             server, port, user = _validate(imap_server, imap_port, account)
             if cls._uses_postgres():
                 return cls._update_postgres_locked(account_id, server, port, user, password)
@@ -579,10 +565,10 @@ class Config:
             return cls._write_graph_locked(None, user, secret, app_id, token, None)
 
     @classmethod
-    def add_outlook_imap_account(cls, account, client_id, refresh_token) -> dict:
-        user, app_id, token = _validate_outlook_imap(account, client_id, refresh_token)
+    def add_outlook_account(cls, account, client_id, refresh_token) -> dict:
+        user, app_id, token = _validate_outlook_oauth(account, client_id, refresh_token)
         with cls._lock:
-            return cls._write_outlook_imap_locked(None, user, app_id, token, None)
+            return cls._write_outlook_locked(None, user, app_id, token, None)
 
     @classmethod
     def import_graph_accounts(cls, text: str) -> dict:
@@ -618,7 +604,7 @@ class Config:
         with cls._lock:
             for item in parsed:
                 try:
-                    saved = cls._write_outlook_imap_locked(
+                    saved = cls._write_outlook_locked(
                         None, item["account"], item["client_id"], item["refresh_token"], None,
                     )
                 except ValueError as exc:
@@ -636,7 +622,7 @@ class Config:
             return
         with cls._lock:
             current = cls._find_locked(account_id)
-            if current.get("protocol") not in {"graph", "outlook_imap"} \
+            if current.get("protocol") != "graph" \
                     or current.get("refresh_token") != previous:
                 return
             current["refresh_token"] = token
@@ -688,37 +674,9 @@ class Config:
         return _public(entry)
 
     @classmethod
-    def _write_outlook_imap_locked(
-        cls, account_id: str | None, account, client_id, refresh_token, current: dict | None
-    ) -> dict:
-        user, app_id, token = _validate_outlook_imap(account, client_id, refresh_token)
-        cls._ensure_unique_locked(OUTLOOK_IMAP_SERVER, user, account_id)
-        if account_id is None:
-            accounts = [] if cls._uses_postgres() else cls._load_locked()
-            existing = {item["id"] for item in accounts}
-            new_id = secrets.token_hex(4)
-            while new_id in existing:
-                new_id = secrets.token_hex(4)
-            account_id = new_id
-        entry = {
-            "id": account_id,
-            "protocol": "outlook_imap",
-            "imap_server": OUTLOOK_IMAP_SERVER,
-            "imap_port": OUTLOOK_IMAP_PORT,
-            "account": user,
-            "password": "",
-            "client_id": app_id,
-            "refresh_token": token,
-        }
-        if cls._uses_postgres():
-            return cls._upsert_outlook_imap_postgres_locked(entry, current is not None)
-        if current is None:
-            next_accounts = [*cls._load_locked(), entry]
-        else:
-            next_accounts = [entry if item["id"] == account_id else item for item in cls._load_locked()]
-        cls._write_locked(next_accounts)
-        cls._accounts = next_accounts
-        return _public(entry)
+    def _write_outlook_locked(cls, account_id, account, client_id, refresh_token, current):
+        user, app_id, token = _validate_outlook_oauth(account, client_id, refresh_token)
+        return cls._write_graph_locked(account_id, user, "", app_id, token, current)
 
     @classmethod
     def remove_account(cls, account_id: str) -> None:
@@ -839,48 +797,6 @@ class Config:
                             (
                                 entry["id"], entry["imap_server"], entry["imap_port"], entry["account"],
                                 entry["password"], entry["client_id"], entry["refresh_token"],
-                            ),
-                        )
-        except AccountNotFound:
-            raise
-        except Exception as exc:
-            if exc.__class__.__name__ == "UniqueViolation":
-                raise ValueError("该邮箱已添加，请勿重复配置。") from exc
-            raise
-        return _public(entry)
-
-    @classmethod
-    def _upsert_outlook_imap_postgres_locked(cls, entry: dict, updating: bool) -> dict:
-        cls.initialize()
-        try:
-            with cls._pg_connection() as conn:
-                with conn.cursor() as cursor:
-                    if updating:
-                        cursor.execute(
-                            """
-                            UPDATE mail_accounts
-                            SET protocol = 'outlook_imap', imap_server = %s, imap_port = %s,
-                                account = %s, password = '', client_id = %s, refresh_token = %s,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = %s
-                            """,
-                            (
-                                entry["imap_server"], entry["imap_port"], entry["account"],
-                                entry["client_id"], entry["refresh_token"], entry["id"],
-                            ),
-                        )
-                        if cursor.rowcount != 1:
-                            raise AccountNotFound(entry["id"])
-                    else:
-                        cursor.execute(
-                            """
-                            INSERT INTO mail_accounts
-                                (id, protocol, imap_server, imap_port, account, password, client_id, refresh_token)
-                            VALUES (%s, 'outlook_imap', %s, %s, %s, '', %s, %s)
-                            """,
-                            (
-                                entry["id"], entry["imap_server"], entry["imap_port"], entry["account"],
-                                entry["client_id"], entry["refresh_token"],
                             ),
                         )
         except AccountNotFound:

@@ -245,11 +245,6 @@ class MailWatcher(threading.Thread):
             return ()
         if account.get("protocol") == "graph":
             return ("graph", account["account"].lower(), account.get("client_id") or "")
-        if account.get("protocol") == "outlook_imap":
-            return (
-                "outlook_imap", account["account"].lower(), account.get("client_id") or "",
-                account.get("refresh_token") or "",
-            )
         return (account["imap_server"].lower(), account["imap_port"], account["account"].lower())
 
     def check_account(self, account_id: str) -> None:

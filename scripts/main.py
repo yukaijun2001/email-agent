@@ -318,7 +318,7 @@ class InboxHandler(BaseHTTPRequestHandler):
                 payload.get("refresh_token", ""),
             )
         if protocol == "outlook_imap":
-            return config.Config.add_outlook_imap_account(
+            return config.Config.add_outlook_account(
                 payload.get("account", ""),
                 payload.get("client_id", ""),
                 payload.get("refresh_token", ""),
@@ -361,7 +361,7 @@ class InboxHandler(BaseHTTPRequestHandler):
     def _start_outlook_auth(self) -> None:
         try:
             payload = self._request_json()
-            result = self.reader.pool.oauth().start_device_flow(
+            result = self.reader.outlook_oauth().start_device_flow(
                 payload.get("account", ""),
                 payload.get("client_id", ""),
                 payload.get("account_id") or None,
@@ -391,7 +391,7 @@ class InboxHandler(BaseHTTPRequestHandler):
     def _poll_outlook_auth(self) -> None:
         try:
             payload = self._request_json()
-            result = self.reader.pool.oauth().poll_device_flow(payload.get("flow_id", ""))
+            result = self.reader.outlook_oauth().poll_device_flow(payload.get("flow_id", ""))
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
         except MailboxError as exc:
@@ -482,7 +482,7 @@ def main() -> None:
     watcher.start()
     print("只读收件箱已启动: http://%s:%s" % (config.APP_HOST, config.APP_PORT))
     print("WebSocket 推送: ws://%s:%s/ws（每 %s 秒检查新邮件）" % (config.APP_HOST, config.APP_PORT, config.POLL_INTERVAL_SECONDS))
-    print("IMAP、Outlook IMAP OAuth2 与 Outlook Graph 均只读取 INBOX，按 Ctrl+C 停止。")
+    print("IMAP 与 Outlook Graph 均只读取 INBOX，按 Ctrl+C 停止。")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

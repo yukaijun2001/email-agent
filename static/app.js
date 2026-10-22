@@ -6,7 +6,6 @@
     selected: null,      // "<account_id>:<uid>"
     filter: "all",
     editing: null,       // account id being edited, "" for a new one, null when form hidden
-    outlookProtocol: "outlook_imap",
     fresh: new Set(),    // keys of messages pushed over WebSocket, highlighted until opened
     animatedRows: new Set(),
     animatedMailboxes: new Set(),
@@ -174,11 +173,9 @@
       row.querySelector("strong").textContent = item.account;
       row.querySelector("span").textContent = item.protocol === "graph"
         ? "Outlook · Graph"
-        : item.protocol === "outlook_imap"
-          ? "Outlook · IMAP OAuth2"
-          : `${item.imap_server}:${item.imap_port}`;
+        : `${item.imap_server}:${item.imap_port}`;
       row.querySelector('[data-action="edit"]').addEventListener("click", () => (
-        ["graph", "outlook_imap"].includes(item.protocol) ? showOutlook(item) : showForm(item)
+        item.protocol === "graph" ? showOutlook(item) : showForm(item)
       ));
       row.querySelector('[data-action="delete"]').addEventListener("click", () => deleteAccount(item));
       return row;
@@ -647,7 +644,6 @@
     resetOutlookImport();
     resetOutlookFlow();
     state.editing = item ? item.id : "";
-    state.outlookProtocol = item && item.protocol === "graph" ? "graph" : "outlook_imap";
     form.hidden = true;
     accountHome.hidden = true;
     outlookError.hidden = true;
@@ -661,15 +657,10 @@
     clientIdInput.value = item ? item.client_id || "" : "";
     refreshTokenInput.value = "";
     refreshTokenInput.required = false;
-    const legacyGraph = state.outlookProtocol === "graph";
-    outlookAuthorize.hidden = legacyGraph;
-    outlookAdvanced.open = legacyGraph;
-    outlookHint.textContent = legacyGraph
-      ? "这是已有的 Graph 账号；可留空 refresh token 保留原值。新 Outlook 账号默认使用 IMAP OAuth2。"
-      : item
-        ? "点击开始授权可更换 OAuth2 凭据；已有 refresh token 也可以在高级区域直接保存。"
-        : "应用需允许个人 Microsoft 账号并启用公共客户端流；无需填写邮箱密码。";
-    outlookSave.textContent = legacyGraph ? "保存 Graph 设置" : "保存已有 Token";
+    outlookAuthorize.hidden = false;
+    outlookAdvanced.open = true;
+    outlookHint.textContent = "使用 Graph Mail.Read 权限；可留空 refresh token 保留原值，或重新完成 Microsoft 授权。";
+    outlookSave.textContent = "保存 Graph 设置";
     graphAccountInput.focus();
   }
 
@@ -864,7 +855,7 @@
     const editing = state.editing;
     try {
       const body = JSON.stringify({
-        protocol: state.outlookProtocol,
+        protocol: "graph",
         account: graphAccountInput.value.trim(),
         password: "",
         client_id: clientIdInput.value.trim(),
@@ -880,7 +871,7 @@
       outlookError.textContent = error.message;
     } finally {
       outlookSave.disabled = false;
-      outlookSave.textContent = state.outlookProtocol === "graph" ? "保存 Graph 设置" : "保存已有 Token";
+      outlookSave.textContent = "保存 Graph 设置";
     }
   }
 

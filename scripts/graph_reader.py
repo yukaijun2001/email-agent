@@ -3,7 +3,7 @@
 Accounts use the four-part import line
 ``email----password----client_id----refresh_token``. Graph itself exchanges
 ``client_id`` and ``refresh_token`` for an access token; the mailbox password
-is stored with the account and is not sent to Microsoft.
+is not used or sent to Microsoft.
 """
 
 from __future__ import annotations
@@ -22,10 +22,12 @@ from typing import Any
 try:
     from . import config, html_sanitizer
     from .imap_reader import MailboxError, _Body
+    from .microsoft_oauth import oauth_error_message
 except ImportError:  # Running scripts/main.py directly.
     import config
     import html_sanitizer
     from imap_reader import MailboxError, _Body
+    from microsoft_oauth import oauth_error_message
 
 
 TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -120,6 +122,8 @@ def explain_graph_error(payload: str, status: int = 0) -> str:
         else:
             code = str(error or "")
             description = str(parsed.get("error_description") or description)
+            if code:
+                return oauth_error_message(parsed, status)
     blob = f"{code} {description}"
     if "AADSTS90023" in blob:
         return "当前应用未提供可用的邮箱授权权限，请检查 Mail.Read 授权。"
@@ -182,7 +186,7 @@ class GraphClient:
         except config.AccountNotFound as exc:
             raise MailboxError("邮箱不存在或已被删除。") from exc
         if account.get("protocol") != "graph":
-            raise MailboxError("这个邮箱不是 Outlook Graph 账号。")
+            raise MailboxError("这个邮箱不是 Outlook OAuth2 账号。")
         if not account.get("account") or not account.get("client_id") or not account.get("refresh_token"):
             raise MailboxError("请填写 Outlook 邮箱、client_id 和 refresh_token。")
         return account

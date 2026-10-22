@@ -314,39 +314,13 @@ class _SessionPool:
     def __init__(self) -> None:
         self._idle: dict[str, list[_Session]] = {}
         self._lock = threading.Lock()
-        self._oauth = None
-
-    def oauth(self):
-        if self._oauth is None:
-            try:
-                from .outlook_imap import OutlookOAuth
-            except ImportError:
-                from outlook_imap import OutlookOAuth
-            self._oauth = OutlookOAuth()
-        return self._oauth
 
     @staticmethod
     def _settings(account_id: str) -> tuple:
         try:
-            account = config.Config.mailbox(account_id)
+            return config.Config.connection_values(account_id)
         except config.AccountNotFound as exc:
-            # Unit-test fakes and legacy embedders may only provide the older
-            # four-value connection API.
-            try:
-                return ("password", *config.Config.connection_values(account_id))
-            except config.AccountNotFound:
-                raise MailboxError("邮箱不存在或已被删除。") from exc
-        if account.get("protocol") == "outlook_imap":
-            return (
-                "xoauth2",
-                account["imap_server"],
-                account["imap_port"],
-                account["account"],
-                account.get("client_id") or "",
-                account.get("refresh_token") or "",
-            )
-        server, port, username, password = config.Config.connection_values(account_id)
-        return ("password", server, port, username, password)
+            raise MailboxError("邮箱不存在或已被删除。") from exc
 
     def acquire(self, account_id: str, fresh: bool = False) -> _Session:
         signature = self._settings(account_id)
@@ -369,24 +343,15 @@ class _SessionPool:
         return _Session(signature, self._connect(account_id, signature))
 
     def _connect(self, account_id: str, signature: tuple) -> Any:
-        auth_kind, server, port, account, *credentials = signature
-        if not server or not account or not credentials or not all(credentials):
+        server, port, account, password = signature
+        if not server or not account or not password:
             raise MailboxError("请先在浏览器中完成邮箱连接设置。")
         try:
             connection = imaplib.IMAP4_SSL(server, port, timeout=SOCKET_TIMEOUT_SECONDS)
         except Exception as exc:
             raise MailboxError(f"无法连接 {server}:{port}，请检查服务器地址和网络。") from exc
         try:
-            if auth_kind == "xoauth2":
-                oauth = self.oauth()
-                token = oauth.access_token(account_id)
-                try:
-                    from .outlook_imap import xoauth2_bytes
-                except ImportError:
-                    from outlook_imap import xoauth2_bytes
-                connection.authenticate("XOAUTH2", lambda _challenge: xoauth2_bytes(account, token))
-            else:
-                connection.login(account, credentials[0])
+            connection.login(account, password)
         except MailboxError:
             try:
                 connection.shutdown()
@@ -398,8 +363,6 @@ class _SessionPool:
                 connection.shutdown()
             except Exception:
                 pass
-            if auth_kind == "xoauth2":
-                raise MailboxError("Outlook IMAP OAuth2 登录失败，请重新完成 Microsoft 授权。") from exc
             raise MailboxError("IMAP 登录失败，请检查服务器、账号和授权码。") from exc
         return connection
 
@@ -428,8 +391,6 @@ class _SessionPool:
                 self._idle[account_id] = alive
         for session in expired:
             session.close()
-        if self._oauth is not None and keep_ids is not None:
-            self._oauth.prune(keep_ids)
 
     def close_all(self) -> None:
         with self._lock:
@@ -437,8 +398,6 @@ class _SessionPool:
             self._idle.clear()
         for session in sessions:
             session.close()
-        if self._oauth is not None:
-            self._oauth.close()
 
 
 # Errors that mean the TCP/TLS session is unusable (server timeout, network drop).
@@ -458,6 +417,7 @@ class InboxReader:
     def __init__(self) -> None:
         self.pool = _SessionPool()
         self._graph = None
+        self._outlook_oauth = None
         # (account_id, uidvalidity, uid) -> (public message, _Body)
         self._bodies: OrderedDict[tuple, tuple[dict[str, Any], _Body]] = OrderedDict()
         self._body_bytes = 0
@@ -466,8 +426,19 @@ class InboxReader:
 
     def close(self) -> None:
         self.pool.close_all()
+        if self._outlook_oauth is not None:
+            self._outlook_oauth.close()
         if self._graph is not None:
             self._graph.close()
+
+    def outlook_oauth(self):
+        if self._outlook_oauth is None:
+            try:
+                from .outlook_oauth import OutlookOAuth
+            except ImportError:
+                from outlook_oauth import OutlookOAuth
+            self._outlook_oauth = OutlookOAuth()
+        return self._outlook_oauth
 
     def graph(self):
         if self._graph is None:
@@ -487,6 +458,8 @@ class InboxReader:
     def prune(self) -> None:
         keep = set(config.Config.account_ids())
         self.pool.prune(keep)
+        if self._outlook_oauth is not None:
+            self._outlook_oauth.prune(keep)
         if self._graph is not None:
             self._graph.prune(keep)
         with self._cache_lock:
