@@ -4,7 +4,8 @@
     accounts: [],
     accountErrors: {},   // account_id -> latest error message (list or watcher)
     selected: null,      // "<account_id>:<uid>"
-    filter: "all",
+    filter: null,        // null means all accounts; otherwise a Set of account ids
+    selectedAccounts: new Set(), // staged selection for the batch view
     editing: null,       // account id being edited, "" for a new one, null when form hidden
     fresh: new Set(),    // keys of messages pushed over WebSocket, highlighted until opened
     animatedRows: new Set(),
@@ -16,6 +17,12 @@
   const list = $("#emailList");
   const listState = $("#listState");
   const mailboxList = $("#mailboxList");
+  const mailboxSearch = $("#mailboxSearch");
+  const selectVisibleMailboxes = $("#selectVisibleMailboxes");
+  const clearMailboxSelection = $("#clearMailboxSelection");
+  const mailboxSelectionCount = $("#mailboxSelectionCount");
+  const showAllMailboxes = $("#showAllMailboxes");
+  const showSelectedMailboxes = $("#showSelectedMailboxes");
   const accountCount = $("#accountCount");
   const mailboxHeading = $("#mailboxHeading");
   const search = $("#searchInput");
@@ -131,9 +138,24 @@
   function applyAccounts(snapshot) {
     state.accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
     const ids = new Set(state.accounts.map((item) => item.id));
+    const previousFilterSize = state.filter ? state.filter.size : 0;
+    const hadRemovedEmails = state.emails.some((email) => !ids.has(email.account_id));
+    if (hadRemovedEmails) {
+      state.emails = state.emails.filter((email) => ids.has(email.account_id));
+      const remainingKeys = new Set(state.emails.map(keyOf));
+      for (const key of state.fresh) if (!remainingKeys.has(key)) state.fresh.delete(key);
+      if (state.selected && !remainingKeys.has(state.selected)) {
+        state.selected = null;
+        messageDialogContent.innerHTML = EMPTY_DETAIL;
+      }
+    }
     for (const id of Object.keys(state.accountErrors)) if (!ids.has(id)) delete state.accountErrors[id];
     accountCount.textContent = String(state.accounts.length);
-    if (state.filter !== "all" && !ids.has(state.filter)) state.filter = "all";
+    state.selectedAccounts = new Set([...state.selectedAccounts].filter((id) => ids.has(id)));
+    if (state.filter) {
+      state.filter = new Set([...state.filter].filter((id) => ids.has(id)));
+      if (!state.filter.size) state.filter = null;
+    }
 
     const configured = state.accounts.filter((item) => item.configured).length;
     accountName.textContent = !state.accounts.length
@@ -144,6 +166,14 @@
     renderAccountErrors();
     renderAccountList();
     renderMailboxList();
+    updateMailboxHeading();
+    if (hadRemovedEmails || (state.filter ? state.filter.size : 0) !== previousFilterSize) {
+      if (state.accounts.length) renderList();
+      else {
+        count.textContent = "尚未连接";
+        setStatus("请先在右上角“邮箱管理”中添加邮箱。", false);
+      }
+    }
   }
 
   function renderAccountErrors() {
@@ -183,29 +213,79 @@
   }
 
   function mailboxEmailCount(id) {
-    return id === "all" ? state.emails.length : state.emails.filter((email) => email.account_id === id).length;
+    return state.emails.filter((email) => email.account_id === id).length;
+  }
+
+  function matchingMailboxes() {
+    const query = mailboxSearch.value.trim().toLowerCase();
+    return state.accounts.filter((item) => !query || String(item.account || "").toLowerCase().includes(query));
+  }
+
+  function updateMailboxSelection() {
+    const matches = matchingMailboxes();
+    selectVisibleMailboxes.disabled = !matches.some((item) => !state.selectedAccounts.has(item.id));
+    clearMailboxSelection.disabled = !state.selectedAccounts.size;
+    showSelectedMailboxes.disabled = !state.selectedAccounts.size;
+    showAllMailboxes.disabled = !state.filter;
+    mailboxSelectionCount.textContent = `已选 ${state.selectedAccounts.size} 个`;
+    for (const item of mailboxList.querySelectorAll(".mailbox-item")) {
+      item.querySelector(".mailbox-checkbox").checked = state.selectedAccounts.has(item.dataset.accountId);
+    }
+  }
+
+  function updateMailboxRows() {
+    for (const item of mailboxList.querySelectorAll(".mailbox-item")) {
+      const id = item.dataset.accountId;
+      const selected = Boolean(state.filter && state.filter.has(id));
+      item.classList.toggle("selected", selected);
+      item.querySelector(".mailbox-row").setAttribute("aria-pressed", String(selected));
+      item.querySelector(".mailbox-unread").textContent = mailboxEmailCount(id);
+    }
+    updateMailboxSelection();
+  }
+
+  function updateMailboxHeading() {
+    mailboxHeading.textContent = !state.filter
+      ? "全部邮件"
+      : state.filter.size === 1 ? accountTitle(state.filter.values().next().value) : `${state.filter.size} 个邮箱的邮件`;
   }
 
   function renderMailboxList() {
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const rows = state.accounts.map((item, index) => {
-      const row = document.createElement("button");
-      row.type = "button";
+    const rows = matchingMailboxes().map((item, index) => {
+      const row = document.createElement("div");
       const entering = !reduceMotion && !state.animatedMailboxes.has(item.id);
-      row.className = `mailbox-row${state.filter === item.id ? " selected" : ""}${entering ? " row-enter" : ""}`;
+      row.className = `mailbox-item${entering ? " row-enter" : ""}`;
+      row.dataset.accountId = item.id;
       if (entering) row.style.setProperty("--row-delay", `${Math.min(index, 4) * 80}ms`);
       state.animatedMailboxes.add(item.id);
-      row.setAttribute("role", "option");
-      row.setAttribute("aria-selected", String(state.filter === item.id));
-      row.innerHTML = '<span class="mailbox-avatar" aria-hidden="true"></span><span class="mailbox-copy"><strong></strong><small></small></span><span class="mailbox-unread"></span>';
+      row.setAttribute("role", "listitem");
+      row.innerHTML = '<input class="mailbox-checkbox" type="checkbox"><button class="mailbox-row" type="button"><span class="mailbox-avatar" aria-hidden="true"></span><span class="mailbox-copy"><strong></strong><small></small></span><span class="mailbox-unread"></span></button>';
+      const checkbox = row.querySelector(".mailbox-checkbox");
+      checkbox.setAttribute("aria-label", `选择 ${item.account}`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) state.selectedAccounts.add(item.id);
+        else state.selectedAccounts.delete(item.id);
+        updateMailboxSelection();
+      });
       row.querySelector(".mailbox-avatar").textContent = (item.account || "?").slice(0, 1).toUpperCase();
       row.querySelector("strong").textContent = item.account;
       row.querySelector("small").textContent = item.configured ? "已连接 · INBOX" : "需要设置";
-      row.querySelector(".mailbox-unread").textContent = mailboxEmailCount(item.id);
-      row.addEventListener("click", () => { state.filter = item.id; renderMailboxList(); renderList(); });
+      row.querySelector(".mailbox-row").addEventListener("click", () => {
+        state.filter = new Set([item.id]);
+        renderList();
+      });
       return row;
     });
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "mailbox-empty";
+      empty.setAttribute("role", "listitem");
+      empty.textContent = state.accounts.length ? "没有找到匹配的邮箱。" : "还没有添加邮箱。";
+      rows.push(empty);
+    }
     mailboxList.replaceChildren(...rows);
+    updateMailboxRows();
   }
 
   async function loadAccounts() {
@@ -216,7 +296,7 @@
   function visibleEmails() {
     const query = search.value.trim().toLowerCase();
     return state.emails.filter((email) => {
-      if (state.filter !== "all" && email.account_id !== state.filter) return false;
+      if (state.filter && !state.filter.has(email.account_id)) return false;
       return !query || `${email.from} ${email.subject}`.toLowerCase().includes(query);
     });
   }
@@ -224,8 +304,8 @@
   function renderList() {
     const emails = visibleEmails();
     count.textContent = `${emails.length} / ${state.emails.length} 封邮件`;
-    mailboxHeading.textContent = state.filter === "all" ? "全部邮件" : accountTitle(state.filter);
-    renderMailboxList();
+    updateMailboxHeading();
+    updateMailboxRows();
     if (!emails.length) {
       setStatus(state.emails.length ? "没有匹配的邮件。" : "收件箱为空。", false);
       return;
@@ -779,6 +859,27 @@
     connectSocket();
   }
 
+  mailboxSearch.addEventListener("input", () => {
+    renderMailboxList();
+    mailboxList.scrollTop = 0;
+  });
+  selectVisibleMailboxes.addEventListener("click", () => {
+    for (const item of matchingMailboxes()) state.selectedAccounts.add(item.id);
+    updateMailboxSelection();
+  });
+  clearMailboxSelection.addEventListener("click", () => {
+    state.selectedAccounts.clear();
+    updateMailboxSelection();
+  });
+  showSelectedMailboxes.addEventListener("click", () => {
+    if (!state.selectedAccounts.size) return;
+    state.filter = new Set(state.selectedAccounts);
+    renderList();
+  });
+  showAllMailboxes.addEventListener("click", () => {
+    state.filter = null;
+    renderList();
+  });
   search.addEventListener("input", renderList);
   refresh.addEventListener("click", () => { if (state.accounts.length) loadEmails(); else openConfig(); });
   banner.addEventListener("click", hideBanner);

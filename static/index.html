@@ -50,14 +50,33 @@
 
     <section class="workspace" aria-label="邮箱列表和邮件列表">
       <aside class="mailbox-panel" aria-label="邮箱列表">
-        <div class="mailbox-panel-head">
-          <div>
-            <p class="eyebrow">MAILBOXES</p>
-            <h2>邮箱</h2>
+        <header class="mailbox-controls">
+          <div class="mailbox-panel-head">
+            <div>
+              <p class="eyebrow">MAILBOXES</p>
+              <h2>邮箱</h2>
+            </div>
+            <span id="accountCount" class="panel-count">0</span>
           </div>
-          <span id="accountCount" class="panel-count">0</span>
-        </div>
-        <div id="mailboxList" class="mailbox-list" role="listbox" aria-label="选择邮箱"></div>
+          <label class="search-box mailbox-search">
+            <span class="search-icon" aria-hidden="true"></span>
+            <span class="sr-only">搜索邮箱</span>
+            <input id="mailboxSearch" type="search" placeholder="搜索邮箱地址" autocomplete="off" aria-describedby="mailboxHint">
+          </label>
+          <div class="mailbox-bulk-controls" aria-label="邮箱批量选择">
+            <button id="selectVisibleMailboxes" class="button button-quiet" type="button" title="选择当前搜索结果中的所有邮箱" disabled>全选当前</button>
+            <button id="clearMailboxSelection" class="button button-quiet" type="button" title="清空所有已勾选的邮箱" disabled>清空选择</button>
+          </div>
+          <p id="mailboxHint" class="mailbox-hint">点击邮箱单独查看；勾选后可合并查看。</p>
+        </header>
+        <div id="mailboxList" class="mailbox-list" role="list" aria-label="邮箱列表" tabindex="0"></div>
+        <footer class="mailbox-panel-foot">
+          <span id="mailboxSelectionCount" class="mailbox-selection-count" aria-live="polite">已选 0 个</span>
+          <div class="mailbox-foot-actions">
+            <button id="showAllMailboxes" class="button button-quiet" type="button" disabled>查看全部</button>
+            <button id="showSelectedMailboxes" class="button button-dark" type="button" disabled>查看所选</button>
+          </div>
+        </footer>
       </aside>
       <section class="email-panel" aria-label="邮件列表">
         <header class="email-panel-head">
@@ -170,7 +189,7 @@
       <div class="help-section">
         <h3>可以做什么</h3>
         <ul>
-          <li><strong>多邮箱</strong><span>在“邮箱管理”中添加多个邮箱，列表合并显示，也可用左上角下拉框只看某一个邮箱。</span></li>
+          <li><strong>多邮箱</strong><span>在“邮箱管理”中添加多个邮箱。点击左侧邮箱可单独查看；勾选多个邮箱后点击“查看所选”可合并查看。</span></li>
           <li><strong>实时推送</strong><span>页面打开期间服务会定时检查各邮箱，新邮件通过 WebSocket 自动出现在列表顶部，无需手动刷新。</span></li>
           <li><strong>只读收件箱</strong><span>读取 INBOX 邮件，不发送、回复、删除或移动邮件。</span></li>
           <li><strong>搜索邮件</strong><span>按发件人或主题快速筛选当前邮件列表。</span></li>
